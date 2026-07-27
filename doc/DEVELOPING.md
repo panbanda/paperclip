@@ -331,6 +331,31 @@ If the `codex` CLI is not installed or not on `PATH`, `codex_local` agent runs f
 
 Local adapters require their corresponding CLI/session setup on the machine running Paperclip. External adapters are installed through the adapter/plugin flow and should not require hardcoded imports in `server/` or `ui/`.
 
+## Plugin Worker Environment Passthrough
+
+Plugin workers receive a deliberately stripped environment. A deployment
+operator can pass additional host variables to a specific environment-provider
+plugin with `PAPERCLIP_PLUGIN_ENV_PASSTHROUGH`. Its value is a JSON object whose
+keys are exact plugin ids and whose values are arrays of environment-variable
+names:
+
+```sh
+PAPERCLIP_PLUGIN_ENV_PASSTHROUGH='{
+  "paperclip.kubernetes-sandbox-provider": [
+    "PAPERCLIP_KUBERNETES_RUNNER_IMAGE",
+    "ANTHROPIC_BASE_URL"
+  ]
+}'
+```
+
+The configuration contains names only, never secret values. Values are copied
+from the server environment only for the named plugin and only when its manifest
+declares `environment.drivers.register`. Malformed mappings, invalid names, and
+reserved host credentials fail closed. Database credentials, the Paperclip
+secrets master key, Better Auth secrets, and ambient AWS credentials cannot be
+passed through this mechanism. Process-launch controls such as `NODE_OPTIONS`,
+`PATH`, and dynamic-loader variables are also reserved.
+
 ## Config Freshness
 
 Agent, project, environment, secret, skill, and workspace config edits are sampled at the next run boundary. A heartbeat that is already running finishes with the config it started with.
