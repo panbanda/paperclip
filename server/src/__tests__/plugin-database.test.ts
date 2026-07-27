@@ -229,8 +229,7 @@ describe("buildPluginWorkerEnv", () => {
         "example.invalid/paperclip-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       ANTHROPIC_BASE_URL: "https://gateway.example.test",
       ANTHROPIC_AUTH_TOKEN: "gateway-token",
-      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:
-        "/v2/credentials/12345678-90ab-cdef-1234-567890abcdef",
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/x",
       AWS_CONTAINER_CREDENTIALS_FULL_URI: "https://must-not-be-used.example.test",
       AWS_CONTAINER_AUTHORIZATION_TOKEN: "must-not-leak",
       DATABASE_URL: "postgres://must-not-leak",
@@ -259,8 +258,7 @@ describe("buildPluginWorkerEnv", () => {
         "example.invalid/paperclip-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       ANTHROPIC_BASE_URL: "https://gateway.example.test",
       ANTHROPIC_AUTH_TOKEN: "gateway-token",
-      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:
-        "/v2/credentials/12345678-90ab-cdef-1234-567890abcdef",
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/x",
     });
     expect(kubernetesEnv).not.toHaveProperty("DATABASE_URL");
     expect(kubernetesEnv).not.toHaveProperty("AWS_CONTAINER_CREDENTIALS_FULL_URI");
