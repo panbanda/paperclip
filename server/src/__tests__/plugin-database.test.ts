@@ -219,13 +219,21 @@ describe("buildPluginWorkerEnv", () => {
           "PAPERCLIP_KUBERNETES_RUNNER_IMAGE",
           "ANTHROPIC_BASE_URL",
           "ANTHROPIC_AUTH_TOKEN",
+          "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+          "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+          "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+          "AWS_SECRET_ACCESS_KEY",
         ],
       }),
       PAPERCLIP_KUBERNETES_RUNNER_IMAGE:
         "example.invalid/paperclip-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       ANTHROPIC_BASE_URL: "https://gateway.example.test",
       ANTHROPIC_AUTH_TOKEN: "gateway-token",
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/x",
+      AWS_CONTAINER_CREDENTIALS_FULL_URI: "x",
+      AWS_CONTAINER_AUTHORIZATION_TOKEN: "must-not-leak",
       DATABASE_URL: "postgres://must-not-leak",
+      AWS_SECRET_ACCESS_KEY: "must-not-leak",
     };
 
     const kubernetesEnv = buildPluginWorkerEnv({
@@ -250,8 +258,12 @@ describe("buildPluginWorkerEnv", () => {
         "example.invalid/paperclip-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       ANTHROPIC_BASE_URL: "https://gateway.example.test",
       ANTHROPIC_AUTH_TOKEN: "gateway-token",
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/x",
     });
     expect(kubernetesEnv).not.toHaveProperty("DATABASE_URL");
+    expect(kubernetesEnv).not.toHaveProperty("AWS_CONTAINER_CREDENTIALS_FULL_URI");
+    expect(kubernetesEnv).not.toHaveProperty("AWS_CONTAINER_AUTHORIZATION_TOKEN");
+    expect(kubernetesEnv).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
     expect(unrelatedEnv).not.toHaveProperty("PAPERCLIP_KUBERNETES_RUNNER_IMAGE");
     expect(unrelatedEnv).not.toHaveProperty("ANTHROPIC_BASE_URL");
     expect(unrelatedEnv).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN");

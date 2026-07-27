@@ -352,9 +352,13 @@ The configuration contains names only, never secret values. Values are copied
 from the server environment only for the named plugin and only when its manifest
 declares `environment.drivers.register`. Malformed mappings, invalid names, and
 reserved host credentials fail closed. Database credentials, the Paperclip
-secrets master key, Better Auth secrets, and ambient AWS credentials cannot be
-passed through this mechanism. Process-launch controls such as `NODE_OPTIONS`,
-`PATH`, and dynamic-loader variables are also reserved.
+secrets master key, Better Auth secrets, AWS access keys/session tokens, web
+identity, full credential-provider URIs, and credential-provider authorization
+tokens cannot be passed through this mechanism. An exact environment-provider
+plugin may receive ECS's `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`; the value is
+only a task-local path, contains no credential material, and resolves to the
+task's existing IAM role. Process-launch controls such as `NODE_OPTIONS`, `PATH`,
+and dynamic-loader variables are also reserved.
 
 ## Config Freshness
 
