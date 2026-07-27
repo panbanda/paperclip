@@ -230,7 +230,7 @@ describe("buildPluginWorkerEnv", () => {
       ANTHROPIC_BASE_URL: "https://gateway.example.test",
       ANTHROPIC_AUTH_TOKEN: "gateway-token",
       AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/x",
-      AWS_CONTAINER_CREDENTIALS_FULL_URI: "https://must-not-be-used.example.test",
+      AWS_CONTAINER_CREDENTIALS_FULL_URI: "x",
       AWS_CONTAINER_AUTHORIZATION_TOKEN: "must-not-leak",
       DATABASE_URL: "postgres://must-not-leak",
       AWS_SECRET_ACCESS_KEY: "must-not-leak",
