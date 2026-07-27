@@ -117,10 +117,10 @@ const K8S_IN_CLUSTER_ENV_PASSTHROUGH = [
   "KUBERNETES_SERVICE_PORT_HTTPS",
 ];
 
-const PLUGIN_ENV_PASSTHROUGH_CONFIG_KEY = "PAPERCLIP_PLUGIN_ENV_PASSTHROUGH";
+const PLUGIN_ENV_PASSTHROUGH_CONFIG_NAME = "PAPERCLIP_PLUGIN_ENV_PASSTHROUGH";
 const ENV_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const PLUGIN_ENV_DENYLIST = new Set([
-  PLUGIN_ENV_PASSTHROUGH_CONFIG_KEY,
+  PLUGIN_ENV_PASSTHROUGH_CONFIG_NAME,
   "DATABASE_URL",
   "DATABASE_MIGRATION_URL",
   "BETTER_AUTH_SECRET",
@@ -156,7 +156,7 @@ function configuredPluginEnvKeys(
   pluginId: string,
   processEnv: NodeJS.ProcessEnv,
 ): string[] {
-  const raw = processEnv[PLUGIN_ENV_PASSTHROUGH_CONFIG_KEY]?.trim();
+  const raw = processEnv[PLUGIN_ENV_PASSTHROUGH_CONFIG_NAME]?.trim();
   if (!raw) return [];
 
   let parsed: unknown;
@@ -164,7 +164,7 @@ function configuredPluginEnvKeys(
     parsed = JSON.parse(raw);
   } catch {
     logger.warn(
-      { pluginId, configKey: PLUGIN_ENV_PASSTHROUGH_CONFIG_KEY },
+      { pluginId, configKey: PLUGIN_ENV_PASSTHROUGH_CONFIG_NAME },
       "ignoring malformed plugin environment passthrough configuration",
     );
     return [];
