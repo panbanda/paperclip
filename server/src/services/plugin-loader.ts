@@ -117,8 +117,76 @@ const K8S_IN_CLUSTER_ENV_PASSTHROUGH = [
   "KUBERNETES_SERVICE_PORT_HTTPS",
 ];
 
+const PLUGIN_ENV_PASSTHROUGH_CONFIG_KEY = "PAPERCLIP_PLUGIN_ENV_PASSTHROUGH";
+const ENV_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+const PLUGIN_ENV_DENYLIST = new Set([
+  PLUGIN_ENV_PASSTHROUGH_CONFIG_KEY,
+  "DATABASE_URL",
+  "DATABASE_MIGRATION_URL",
+  "BETTER_AUTH_SECRET",
+  "PAPERCLIP_SECRETS_MASTER_KEY",
+  "PAPERCLIP_SECRETS_MASTER_KEY_FILE",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_SECURITY_TOKEN",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+  "GOOGLE_CLIENT_SECRET",
+  "OAUTH2_PROXY_CLIENT_SECRET",
+  "OAUTH2_PROXY_COOKIE_SECRET",
+  "PATH",
+  "NODE_PATH",
+  "NODE_OPTIONS",
+  "NODE_ENV",
+  "TZ",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "PAPERCLIP_PLUGIN_ID",
+  "PAPERCLIP_DEPLOYMENT_MODE",
+  "PAPERCLIP_DEPLOYMENT_EXPOSURE",
+]);
+
+function configuredPluginEnvKeys(
+  pluginId: string,
+  processEnv: NodeJS.ProcessEnv,
+): string[] {
+  const raw = processEnv[PLUGIN_ENV_PASSTHROUGH_CONFIG_KEY]?.trim();
+  if (!raw) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    logger.warn(
+      { pluginId, configKey: PLUGIN_ENV_PASSTHROUGH_CONFIG_KEY },
+      "ignoring malformed plugin environment passthrough configuration",
+    );
+    return [];
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return [];
+  }
+
+  const configured = (parsed as Record<string, unknown>)[pluginId];
+  if (!Array.isArray(configured)) return [];
+
+  return Array.from(new Set(configured.filter(
+    (key): key is string =>
+      typeof key === "string"
+      && ENV_KEY_PATTERN.test(key)
+      && !PLUGIN_ENV_DENYLIST.has(key),
+  )));
+}
+
 export function buildPluginWorkerEnv(input: {
-  manifest: Pick<PaperclipPluginManifestV1, "capabilities">;
+  manifest: Pick<PaperclipPluginManifestV1, "id" | "capabilities">;
   instanceInfo: { deploymentMode?: string | null; deploymentExposure?: string | null };
   processEnv?: NodeJS.ProcessEnv;
 }): Record<string, string> {
@@ -132,6 +200,12 @@ export function buildPluginWorkerEnv(input: {
   if (!canRegisterEnvironmentDrivers) return env;
 
   for (const key of [...ADAPTER_ENV_PASSTHROUGH, ...K8S_IN_CLUSTER_ENV_PASSTHROUGH]) {
+    const value = processEnv[key];
+    if (value && value.trim().length > 0) {
+      env[key] = value;
+    }
+  }
+  for (const key of configuredPluginEnvKeys(input.manifest.id, processEnv)) {
     const value = processEnv[key];
     if (value && value.trim().length > 0) {
       env[key] = value;

@@ -150,7 +150,10 @@ describe("buildPluginWorkerEnv", () => {
 
   it("passes only model provider keys through to environment driver plugins", () => {
     const env = buildPluginWorkerEnv({
-      manifest: { capabilities: ["environment.drivers.register"] },
+      manifest: {
+        id: "paperclip.environment-test",
+        capabilities: ["environment.drivers.register"],
+      },
       instanceInfo,
       processEnv: {
         ANTHROPIC_API_KEY: "anthropic-token",
@@ -170,7 +173,10 @@ describe("buildPluginWorkerEnv", () => {
 
   it("passes in-cluster Kubernetes service-discovery vars to environment driver plugins", () => {
     const env = buildPluginWorkerEnv({
-      manifest: { capabilities: ["environment.drivers.register"] },
+      manifest: {
+        id: "paperclip.environment-test",
+        capabilities: ["environment.drivers.register"],
+      },
       instanceInfo,
       processEnv: {
         KUBERNETES_SERVICE_HOST: "10.0.0.1",
@@ -190,7 +196,10 @@ describe("buildPluginWorkerEnv", () => {
 
   it("does not pass provider keys to non-environment plugins", () => {
     const env = buildPluginWorkerEnv({
-      manifest: { capabilities: ["ui.slots.register"] },
+      manifest: {
+        id: "paperclip.ui-test",
+        capabilities: ["ui.slots.register"],
+      },
       instanceInfo,
       processEnv: {
         OPENAI_API_KEY: "openai-token",
@@ -201,6 +210,106 @@ describe("buildPluginWorkerEnv", () => {
       PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
     });
+  });
+
+  it("passes operator-approved host env only to the named environment plugin", () => {
+    const processEnv = {
+      PAPERCLIP_PLUGIN_ENV_PASSTHROUGH: JSON.stringify({
+        "paperclip.kubernetes-sandbox-provider": [
+          "PAPERCLIP_KUBERNETES_RUNNER_IMAGE",
+          "ANTHROPIC_BASE_URL",
+          "ANTHROPIC_AUTH_TOKEN",
+        ],
+      }),
+      PAPERCLIP_KUBERNETES_RUNNER_IMAGE:
+        "example.invalid/paperclip-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      ANTHROPIC_BASE_URL: "https://gateway.example.test",
+      ANTHROPIC_AUTH_TOKEN: "gateway-token",
+      DATABASE_URL: "postgres://must-not-leak",
+    };
+
+    const kubernetesEnv = buildPluginWorkerEnv({
+      manifest: {
+        id: "paperclip.kubernetes-sandbox-provider",
+        capabilities: ["environment.drivers.register"],
+      },
+      instanceInfo,
+      processEnv,
+    });
+    const unrelatedEnv = buildPluginWorkerEnv({
+      manifest: {
+        id: "paperclip.unrelated-environment-provider",
+        capabilities: ["environment.drivers.register"],
+      },
+      instanceInfo,
+      processEnv,
+    });
+
+    expect(kubernetesEnv).toMatchObject({
+      PAPERCLIP_KUBERNETES_RUNNER_IMAGE:
+        "example.invalid/paperclip-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      ANTHROPIC_BASE_URL: "https://gateway.example.test",
+      ANTHROPIC_AUTH_TOKEN: "gateway-token",
+    });
+    expect(kubernetesEnv).not.toHaveProperty("DATABASE_URL");
+    expect(unrelatedEnv).not.toHaveProperty("PAPERCLIP_KUBERNETES_RUNNER_IMAGE");
+    expect(unrelatedEnv).not.toHaveProperty("ANTHROPIC_BASE_URL");
+    expect(unrelatedEnv).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN");
+  });
+
+  it("fails closed for malformed mappings, unsafe keys, and non-environment plugins", () => {
+    const baseProcessEnv = {
+      PAPERCLIP_KUBERNETES_RUNNER_IMAGE: "runner-image",
+      DATABASE_URL: "postgres://must-not-leak",
+      NODE_OPTIONS: "--require=/must-not-run.js",
+    };
+    const manifest = {
+      id: "paperclip.kubernetes-sandbox-provider",
+      capabilities: ["environment.drivers.register"],
+    };
+
+    const malformed = buildPluginWorkerEnv({
+      manifest,
+      instanceInfo,
+      processEnv: {
+        ...baseProcessEnv,
+        PAPERCLIP_PLUGIN_ENV_PASSTHROUGH: "{not-json",
+      },
+    });
+    const unsafe = buildPluginWorkerEnv({
+      manifest,
+      instanceInfo,
+      processEnv: {
+        ...baseProcessEnv,
+        PAPERCLIP_PLUGIN_ENV_PASSTHROUGH: JSON.stringify({
+          "paperclip.kubernetes-sandbox-provider": [
+            "DATABASE_URL",
+            "NODE_OPTIONS",
+            "not a valid env key",
+          ],
+        }),
+      },
+    });
+    const nonEnvironment = buildPluginWorkerEnv({
+      manifest: {
+        id: "paperclip.kubernetes-sandbox-provider",
+        capabilities: ["ui.slots.register"],
+      },
+      instanceInfo,
+      processEnv: {
+        ...baseProcessEnv,
+        PAPERCLIP_PLUGIN_ENV_PASSTHROUGH: JSON.stringify({
+          "paperclip.kubernetes-sandbox-provider": [
+            "PAPERCLIP_KUBERNETES_RUNNER_IMAGE",
+          ],
+        }),
+      },
+    });
+
+    expect(malformed).not.toHaveProperty("PAPERCLIP_KUBERNETES_RUNNER_IMAGE");
+    expect(unsafe).not.toHaveProperty("DATABASE_URL");
+    expect(unsafe).not.toHaveProperty("NODE_OPTIONS");
+    expect(nonEnvironment).not.toHaveProperty("PAPERCLIP_KUBERNETES_RUNNER_IMAGE");
   });
 });
 
