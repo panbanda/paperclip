@@ -632,14 +632,22 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
             providerLeaseId: "sandbox-1",
             metadata: {
               provider: "fake-plugin",
-              image: "fake:test",
-              timeoutMs: 1234,
-              reuseLease: false,
               remoteCwd: "/workspace",
+              phase: "Pending",
+              backend: "sandbox-cr",
+              jobName: "sandbox-1",
+              podName: "sandbox-1-pod",
+              secretName: "sandbox-1-env",
+              nativeFileSyncUnsupported: false,
             },
           };
         }
         if (method === "environmentExecute") {
+          expect(params.config).toEqual({
+            image: "fake:test",
+            timeoutMs: 1234,
+            reuseLease: false,
+          });
           return {
             exitCode: 0,
             signal: null,

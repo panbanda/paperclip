@@ -671,18 +671,10 @@ function createSandboxEnvironmentDriver(
     lease: EnvironmentLease;
     provider: string;
   }): Promise<Record<string, unknown>> {
-    const metadataConfig = sandboxConfigFromLeaseMetadataLoose(input.lease);
-    if (metadataConfig && metadataConfig.provider === input.provider) {
-      const parsed = await resolveEnvironmentDriverConfigForRuntime(db, input.lease.companyId, {
-        id: input.environment.id,
-        driver: "sandbox",
-        config: sandboxConfigForLeaseMetadata(metadataConfig),
-      });
-      if (parsed.driver === "sandbox") {
-        return parsed.config as unknown as Record<string, unknown>;
-      }
-    }
-
+    // Prefer the environment's validated provider config. Lease metadata also
+    // contains provider runtime state (pod names, phases, remote paths) and host
+    // bookkeeping; treating that combined object as config breaks strict
+    // provider schemas and crosses the config/metadata trust boundary.
     if (input.environment.driver === "sandbox") {
       try {
         const parsed = await resolveEnvironmentDriverConfigForRuntime(
@@ -696,6 +688,18 @@ function createSandboxEnvironmentDriver(
       } catch {
         // Lease metadata below is intentionally kept sufficient for cleanup
         // after the environment config changes or becomes invalid.
+      }
+    }
+
+    const metadataConfig = sandboxConfigFromLeaseMetadataLoose(input.lease);
+    if (metadataConfig && metadataConfig.provider === input.provider) {
+      const parsed = await resolveEnvironmentDriverConfigForRuntime(db, input.lease.companyId, {
+        id: input.environment.id,
+        driver: "sandbox",
+        config: sandboxConfigForLeaseMetadata(metadataConfig),
+      });
+      if (parsed.driver === "sandbox") {
+        return parsed.config as unknown as Record<string, unknown>;
       }
     }
 
