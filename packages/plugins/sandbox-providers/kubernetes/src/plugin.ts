@@ -303,44 +303,60 @@ const plugin = definePlugin({
         });
 
     const { uid: ownerUid } = await orchestrator.claim(clients, namespace, manifest);
+    try {
+      // defaultEnv (non-secret base, e.g. the inference base URL) is layered first;
+      // the process-env secrets named by envKeys override it.
+      const adapterEnv = buildAdapterEnv(adapterDefaults);
+      const bootstrapToken = generateBootstrapToken();
 
-    // defaultEnv (non-secret base, e.g. the inference base URL) is layered first;
-    // the process-env secrets named by envKeys override it.
-    const adapterEnv = buildAdapterEnv(adapterDefaults);
-    const bootstrapToken = generateBootstrapToken();
+      // Secret ownerRef: for job backend, the Job owns the Secret (cascade delete).
+      // For sandbox-cr backend, the Sandbox CR owns the Secret.
+      await createPerRunSecret(clients, {
+        namespace,
+        secretName,
+        runId: params.runId,
+        ownerKind: isSandboxCrBackend ? "Sandbox" : "Job",
+        ownerApiVersion: isSandboxCrBackend ? "agents.x-k8s.io/v1alpha1" : "batch/v1",
+        ownerName: jobName,
+        ownerUid,
+        bootstrapToken,
+        adapterEnv,
+      });
 
-    // Secret ownerRef: for job backend, the Job owns the Secret (cascade delete).
-    // For sandbox-cr backend, the Sandbox CR owns the Secret.
-    // NOTE: For sandbox-cr, if the Secret outlives the Sandbox due to a cluster
-    // quirk, the release() call will still clean it up via namespace GC or
-    // explicit delete in a future iteration.
-    await createPerRunSecret(clients, {
-      namespace,
-      secretName,
-      runId: params.runId,
-      ownerKind: isSandboxCrBackend ? "Sandbox" : "Job",
-      ownerApiVersion: isSandboxCrBackend ? "agents.x-k8s.io/v1alpha1" : "batch/v1",
-      ownerName: jobName,
-      ownerUid,
-      bootstrapToken,
-      adapterEnv,
-    });
+      const podName = await orchestrator.findPod(clients, namespace, jobName);
 
-    const podName = await orchestrator.findPod(clients, namespace, jobName);
+      const leaseMetadata: KubernetesLeaseMetadata = {
+        namespace,
+        jobName,
+        podName,
+        secretName,
+        phase: "Pending",
+        backend: config.backend,
+      };
 
-    const leaseMetadata: KubernetesLeaseMetadata = {
-      namespace,
-      jobName,
-      podName,
-      secretName,
-      phase: "Pending",
-      backend: config.backend,
-    };
-
-    return {
-      providerLeaseId: jobName,
-      metadata: leaseMetadata as unknown as Record<string, unknown>,
-    };
+      return {
+        providerLeaseId: jobName,
+        metadata: leaseMetadata as unknown as Record<string, unknown>,
+      };
+    } catch (acquireError) {
+      try {
+        // The host cannot release a lease that acquireLease never returned.
+        // Remove every claimed resource here so retries cannot consume quota or
+        // strand credentials after Secret creation or pod discovery fails.
+        await destroyLeaseResources(clients, {
+          namespace,
+          name: jobName,
+          backend: config.backend,
+          podName: null,
+          secretName,
+        });
+      } catch {
+        // Do not attach raw Kubernetes errors: create-Secret failures can carry
+        // request data and must never leak credential values through logs.
+        throw new Error("Kubernetes sandbox lease acquisition failed and cleanup was incomplete.");
+      }
+      throw acquireError;
+    }
   },
 
   async onEnvironmentResumeLease(
