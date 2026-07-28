@@ -621,25 +621,40 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     const workerManager = {
       isRunning: vi.fn((id: string) => id === pluginId),
       call: vi.fn(async (_pluginId: string, method: string, params: any) => {
-        expect(params.config).toEqual(expect.objectContaining({
-          image: "fake:test",
-          timeoutMs: 1234,
-          reuseLease: false,
-        }));
-        expect(params.config).not.toHaveProperty("provider");
         if (method === "environmentAcquireLease") {
+          expect(params.config).toEqual({
+            image: "fake:test",
+            timeoutMs: 1234,
+            reuseLease: false,
+          });
           return {
             providerLeaseId: "sandbox-1",
             metadata: {
-              provider: "fake-plugin",
-              image: "fake:test",
-              timeoutMs: 1234,
-              reuseLease: false,
+              provider: "provider-metadata-must-not-override-host",
+              sandboxProviderConfig: {
+                provider: "provider-metadata-must-not-override-host",
+              },
+              sandboxApplyCustomImageTemplate: false,
+              agentId: "provider-metadata-must-not-set-agent",
+              reusableSandboxLease: {
+                provider: "provider-metadata-must-not-set-reuse-scope",
+              },
               remoteCwd: "/workspace",
+              phase: "Pending",
+              backend: "sandbox-cr",
+              jobName: "sandbox-1",
+              podName: "sandbox-1-pod",
+              secretName: "sandbox-1-env",
+              nativeFileSyncUnsupported: false,
             },
           };
         }
         if (method === "environmentExecute") {
+          expect(params.config).toEqual({
+            image: "fake:updated",
+            timeoutMs: 4321,
+            reuseLease: false,
+          });
           return {
             exitCode: 0,
             signal: null,
@@ -674,9 +689,31 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       issueId: null,
       heartbeatRunId: runId,
       persistedExecutionWorkspace: null,
+      applyCustomImageTemplate: true,
+    });
+    expect(acquired.lease.metadata).toMatchObject({
+      provider: "fake-plugin",
+      sandboxProviderConfig: fakePluginConfig,
+      sandboxApplyCustomImageTemplate: true,
+    });
+    expect(acquired.lease.metadata).not.toHaveProperty("agentId");
+    expect(acquired.lease.metadata).not.toHaveProperty("reusableSandboxLease");
+    const updatedPluginConfig = {
+      ...fakePluginConfig,
+      image: "fake:updated",
+      timeoutMs: 4321,
+    };
+    const updatedEnvironment = {
+      ...environment,
+      config: updatedPluginConfig,
+    };
+    await environmentService(db).update(environment.id, {
+      driver: "sandbox",
+      name: environment.name,
+      config: updatedPluginConfig,
     });
     const executed = await runtimeWithPlugin.execute({
-      environment,
+      environment: updatedEnvironment,
       lease: acquired.lease,
       command: "printf",
       args: ["ok"],
@@ -685,10 +722,6 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       timeoutMs: 1000,
     });
 
-    await environmentService(db).update(environment.id, {
-      driver: "local",
-      config: {},
-    });
     const released = await runtimeWithPlugin.releaseRunLeases(runId);
 
     expect(executed.stdout).toBe("ok\n");
@@ -696,6 +729,114 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     expect(released[0]?.lease.status).toBe("released");
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentExecute", expect.anything(), 31000);
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentReleaseLease", expect.anything(), 31234);
+  });
+
+  it("falls back to the lease-time provider config when current runtime resolution fails", async () => {
+    const pluginId = randomUUID();
+    const { companyId, environment: baseEnvironment, runId } = await seedEnvironment();
+    const acquiredConfig = {
+      provider: "fallback-plugin",
+      image: "fallback:test",
+      timeoutMs: 1234,
+      reuseLease: false,
+    };
+    const environment = {
+      ...baseEnvironment,
+      name: "Fallback Plugin Sandbox",
+      driver: "sandbox",
+      config: acquiredConfig,
+    };
+    await environmentService(db).update(environment.id, {
+      driver: "sandbox",
+      name: environment.name,
+      config: acquiredConfig,
+    });
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "paperclip.fallback-plugin-sandbox-provider",
+      packageName: "@paperclipai/plugin-fallback-sandbox",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: ["automation"],
+      manifestJson: {
+        id: "paperclip.fallback-plugin-sandbox-provider",
+        apiVersion: 1,
+        version: "1.0.0",
+        displayName: "Fallback Plugin Sandbox Provider",
+        description: "Test fallback plugin provider",
+        author: "Paperclip",
+        categories: ["automation"],
+        capabilities: ["environment.drivers.register"],
+        entrypoints: { worker: "dist/worker.js" },
+        environmentDrivers: [{
+          driverKey: "fallback-plugin",
+          kind: "sandbox_provider",
+          displayName: "Fallback Plugin",
+          configSchema: { type: "object" },
+        }],
+      },
+      status: "ready",
+      installOrder: 1,
+      updatedAt: new Date(),
+    } as any);
+    const workerManager = {
+      isRunning: vi.fn((id: string) => id === pluginId),
+      call: vi.fn(async (_pluginId: string, method: string, params: any) => {
+        expect(params.config).toEqual({
+          image: "fallback:test",
+          timeoutMs: 1234,
+          reuseLease: false,
+        });
+        if (method === "environmentAcquireLease") {
+          return {
+            providerLeaseId: "sandbox-fallback",
+            metadata: {
+              phase: "Pending",
+              backend: "sandbox-cr",
+              jobName: "sandbox-fallback",
+              podName: "sandbox-fallback-pod",
+              secretName: "sandbox-fallback-env",
+            },
+          };
+        }
+        if (method === "environmentExecute") {
+          return {
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "fallback\n",
+            stderr: "",
+          };
+        }
+        throw new Error(`Unexpected plugin method: ${method}`);
+      }),
+    } as unknown as PluginWorkerManager;
+    const runtimeWithPlugin = environmentRuntimeService(db, { pluginWorkerManager: workerManager });
+
+    const acquired = await runtimeWithPlugin.acquireRunLease({
+      companyId,
+      environment,
+      issueId: null,
+      heartbeatRunId: runId,
+      persistedExecutionWorkspace: null,
+    });
+    const invalidCurrentEnvironment = {
+      ...environment,
+      config: {
+        ...acquiredConfig,
+        provider: "different-plugin",
+      },
+    };
+    const executed = await runtimeWithPlugin.execute({
+      environment: invalidCurrentEnvironment,
+      lease: acquired.lease,
+      command: "printf",
+      args: ["fallback"],
+      cwd: "/workspace",
+      env: {},
+    });
+
+    expect(executed.stdout).toBe("fallback\n");
   });
 
   it("uses resolved secret-ref config for plugin-backed sandbox execute and release", async () => {
@@ -818,13 +959,16 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     });
     expect(acquired.lease.metadata).toMatchObject({
       provider: "secure-plugin",
-      template: "base",
-      apiKey: {
-        type: "secret_ref",
-        secretId: apiSecret.id,
-        version: "latest",
+      sandboxProviderConfig: {
+        provider: "secure-plugin",
+        template: "base",
+        apiKey: {
+          type: "secret_ref",
+          secretId: apiSecret.id,
+          version: "latest",
+        },
+        timeoutMs: 1234,
       },
-      timeoutMs: 1234,
       sandboxId: "sandbox-1",
     });
     const executed = await runtimeWithPlugin.execute({
