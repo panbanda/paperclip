@@ -670,34 +670,68 @@ function createSandboxEnvironmentDriver(
     environment: Environment;
     lease: EnvironmentLease;
     provider: string;
+    purpose: "runtime" | "cleanup";
   }): Promise<Record<string, unknown>> {
-    // Prefer the environment's validated provider config. Lease metadata also
-    // contains provider runtime state (pod names, phases, remote paths) and host
-    // bookkeeping; treating that combined object as config breaks strict
-    // provider schemas and crosses the config/metadata trust boundary.
-    if (input.environment.driver === "sandbox") {
+    const context = {
+      issueId: input.lease.issueId,
+      heartbeatRunId: input.lease.heartbeatRunId,
+      applyCustomImageTemplate:
+        input.lease.metadata?.[PLUGIN_SANDBOX_APPLY_CUSTOM_IMAGE_TEMPLATE_METADATA_KEY] === true,
+    };
+
+    const resolveCurrent = async (): Promise<Record<string, unknown> | null> => {
+      if (input.environment.driver !== "sandbox") return null;
       try {
         const parsed = await resolveEnvironmentDriverConfigForRuntime(
           db,
           input.lease.companyId,
           input.environment,
+          context,
         );
         if (parsed.driver === "sandbox" && parsed.config.provider === input.provider) {
           return parsed.config as unknown as Record<string, unknown>;
         }
       } catch {
-        // Lease metadata below is intentionally kept sufficient for cleanup
-        // after the environment config changes or becomes invalid.
+        // A lease-time snapshot remains available when the current environment
+        // is invalid, deleted, or no longer points at this provider.
       }
-    }
+      return null;
+    };
 
-    const metadataConfig = sandboxConfigFromLeaseMetadataLoose(input.lease);
-    if (metadataConfig && metadataConfig.provider === input.provider) {
+    const resolveSnapshot = async (): Promise<Record<string, unknown> | null> => {
+      const snapshot = pluginSandboxConfigSnapshotFromLeaseMetadata(input.lease);
+      if (!snapshot || snapshot.provider !== input.provider) return null;
       const parsed = await resolveEnvironmentDriverConfigForRuntime(db, input.lease.companyId, {
         id: input.environment.id,
         driver: "sandbox",
-        config: sandboxConfigForLeaseMetadata(metadataConfig),
-      });
+        config: snapshot as unknown as Record<string, unknown>,
+      }, context);
+      if (parsed.driver === "sandbox") {
+        return parsed.config as unknown as Record<string, unknown>;
+      }
+      return null;
+    };
+
+    // Running commands should honor intentional environment updates. Cleanup
+    // must target the provider resources acquired under the lease-time config,
+    // even when the environment still uses the same provider with new values.
+    const preferred = input.purpose === "runtime"
+      ? await resolveCurrent() ?? await resolveSnapshot()
+      : await resolveSnapshot() ?? await resolveCurrent();
+    if (preferred) return preferred;
+
+    // Compatibility for leases created before the host-owned snapshot existed.
+    // These rows flattened config and provider runtime metadata together.
+    const legacyConfig = sandboxConfigFromLeaseMetadataLoose(input.lease);
+    if (legacyConfig && legacyConfig.provider === input.provider) {
+      const parsed = await resolveEnvironmentDriverConfigForRuntime(db, input.lease.companyId, {
+        id: input.environment.id,
+        driver: "sandbox",
+        config: {
+          provider: input.provider,
+          ...sanitizePluginSandboxConfigFromLeaseMetadata(input.lease.metadata),
+        },
+      }, context);
       if (parsed.driver === "sandbox") {
         return parsed.config as unknown as Record<string, unknown>;
       }
@@ -705,7 +739,6 @@ function createSandboxEnvironmentDriver(
 
     return {
       provider: input.provider,
-      ...sanitizePluginSandboxConfigFromLeaseMetadata(input.lease.metadata),
     };
   }
 
@@ -915,10 +948,12 @@ function createSandboxEnvironmentDriver(
         const resolvedLeasePolicy = supportsReusableLeases && parsed.config.reuseLease && input.heartbeatRunId !== null
           ? "reuse_by_environment"
           : "ephemeral";
-        const sanitizedProviderMetadata = stripSecretRefValuesFromPluginLeaseMetadata({
-          metadata: acquiredLease.metadata,
-          schema: pluginProvider.resolved.driver.configSchema as Record<string, unknown> | null | undefined,
-        });
+        const sanitizedProviderMetadata = stripHostOwnedPluginSandboxMetadata(
+          stripSecretRefValuesFromPluginLeaseMetadata({
+            metadata: acquiredLease.metadata,
+            schema: pluginProvider.resolved.driver.configSchema as Record<string, unknown> | null | undefined,
+          }),
+        );
         const reusableScope = resolvedLeasePolicy === "reuse_by_environment"
           ? buildReusableSandboxLeaseScope({
               companyId: input.companyId,
@@ -944,14 +979,17 @@ function createSandboxEnvironmentDriver(
           providerLeaseId: acquiredLease.providerLeaseId,
           expiresAt: acquiredLease.expiresAt ? new Date(acquiredLease.expiresAt) : undefined,
           metadata: {
+            ...sanitizedProviderMetadata,
             ...(input.agentId ? { agentId: input.agentId } : {}),
             driver: input.environment.driver,
             executionWorkspaceMode: input.executionWorkspaceMode,
             pluginId: pluginProvider.resolved.plugin.id,
             pluginKey: pluginProvider.resolved.plugin.pluginKey,
+            provider: parsed.config.provider,
             sandboxProviderPlugin: true,
-            ...sandboxConfigForLeaseMetadata(storedConfig),
-            ...sanitizedProviderMetadata,
+            [PLUGIN_SANDBOX_CONFIG_SNAPSHOT_METADATA_KEY]: providerConfigForLease,
+            [PLUGIN_SANDBOX_APPLY_CUSTOM_IMAGE_TEMPLATE_METADATA_KEY]:
+              input.applyCustomImageTemplate === true,
             ...(reusableScope ? { reusableSandboxLease: reusableScope } : {}),
           },
         });
@@ -1167,6 +1205,7 @@ function createSandboxEnvironmentDriver(
             environment: input.environment,
             lease: input.lease,
             provider: providerKey,
+            purpose: "runtime",
           });
           return await pluginWorkerManager.call(pluginId, "environmentRealizeWorkspace", {
             driverKey: providerKey,
@@ -1211,6 +1250,7 @@ function createSandboxEnvironmentDriver(
             environment: input.environment,
             lease: input.lease,
             provider: providerKey,
+            purpose: "runtime",
           });
           const sanitizedConfig = stripSandboxProviderEnvelope(config as SandboxEnvironmentConfig);
           return await pluginWorkerManager.call(pluginId, "environmentExecute", {
@@ -1262,6 +1302,7 @@ function createSandboxEnvironmentDriver(
           environment: input.environment,
           lease: input.lease,
           provider: providerKey,
+          purpose: "cleanup",
         });
         await pluginWorkerManager.call(pluginId, "environmentReleaseLease", {
           driverKey: providerKey,
@@ -1308,6 +1349,7 @@ function createSandboxEnvironmentDriver(
             environment: input.environment,
             lease: input.lease,
             provider: providerKey,
+            purpose: "cleanup",
           });
           await pluginWorkerManager.call(pluginId, "environmentDestroyLease", {
             driverKey: providerKey,
@@ -1366,15 +1408,32 @@ function readString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+const PLUGIN_SANDBOX_CONFIG_SNAPSHOT_METADATA_KEY = "sandboxProviderConfig";
+const PLUGIN_SANDBOX_APPLY_CUSTOM_IMAGE_TEMPLATE_METADATA_KEY =
+  "sandboxApplyCustomImageTemplate";
+
 const INTERNAL_PLUGIN_SANDBOX_CONFIG_KEYS = new Set([
+  "agentId",
   "driver",
   "executionWorkspaceMode",
   "pluginId",
   "pluginKey",
+  "provider",
   "providerMetadata",
+  "reusableSandboxLease",
   "shellCommand",
   "sandboxProviderPlugin",
+  PLUGIN_SANDBOX_CONFIG_SNAPSHOT_METADATA_KEY,
+  PLUGIN_SANDBOX_APPLY_CUSTOM_IMAGE_TEMPLATE_METADATA_KEY,
 ]);
+
+function stripHostOwnedPluginSandboxMetadata(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(metadata).filter(([key]) => !INTERNAL_PLUGIN_SANDBOX_CONFIG_KEYS.has(key)),
+  );
+}
 
 function sanitizePluginSandboxConfigFromLeaseMetadata(
   metadata: Record<string, unknown> | null | undefined,
@@ -1389,6 +1448,18 @@ function sanitizePluginSandboxConfigFromLeaseMetadata(
 
 function sandboxConfigForLeaseMetadata(config: SandboxEnvironmentConfig): Record<string, unknown> {
   return { ...config };
+}
+
+function pluginSandboxConfigSnapshotFromLeaseMetadata(
+  lease: Pick<EnvironmentLease, "metadata">,
+): SandboxEnvironmentConfig | null {
+  const snapshot = lease.metadata?.[PLUGIN_SANDBOX_CONFIG_SNAPSHOT_METADATA_KEY];
+  if (!isRecord(snapshot) || typeof snapshot.provider !== "string") return null;
+  return {
+    ...snapshot,
+    provider: snapshot.provider,
+    reuseLease: snapshot.reuseLease === true,
+  } as SandboxEnvironmentConfig;
 }
 
 function tryParseCurrentPluginConfig(environment: Environment): PluginEnvironmentConfig | null {
