@@ -311,6 +311,14 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function sentryIssueIdFromWebhookPayload(payload: Record<string, unknown> | null | undefined) {
+  if (!payload) return null;
+  const data = isPlainRecord(payload.data) ? payload.data : null;
+  const issue = data && isPlainRecord(data.issue) ? data.issue : null;
+  const id = issue?.id;
+  return typeof id === "string" || typeof id === "number" ? String(id) : null;
+}
+
 function parseBooleanVariableValue(name: string, raw: unknown) {
   if (typeof raw === "boolean") return raw;
   if (typeof raw === "number" && (raw === 0 || raw === 1)) return raw === 1;
@@ -2869,6 +2877,7 @@ export function routineService(
       authorizationHeader?: string | null;
       signatureHeader?: string | null;
       hubSignatureHeader?: string | null;
+      sentrySignatureHeader?: string | null;
       timestampHeader?: string | null;
       idempotencyKey?: string | null;
       rawBody?: Buffer | null;
@@ -2890,10 +2899,12 @@ export function routineService(
       } else if (trigger.signingMode === "github_hmac") {
         const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
         const rawBody = input.rawBody ?? Buffer.from(JSON.stringify(input.payload ?? {}));
-        // Accept X-Hub-Signature-256 (GitHub/Sentry) or fall back to the
-        // generic X-Paperclip-Signature header so operators can use github_hmac
-        // mode with either header convention.
-        const providedSignature = (input.hubSignatureHeader ?? input.signatureHeader)?.trim() ?? "";
+        // GitHub prefixes its digest in X-Hub-Signature-256. Sentry sends the
+        // unprefixed digest in Sentry-Hook-Signature. Keep the generic header
+        // fallback for existing integrations using this raw-body HMAC mode.
+        const providedSignature = (
+          input.hubSignatureHeader ?? input.sentrySignatureHeader ?? input.signatureHeader
+        )?.trim() ?? "";
         if (!providedSignature) throw unauthorized();
         const expectedHmac = crypto
           .createHmac("sha256", secretValue)
@@ -2906,6 +2917,15 @@ export function routineService(
           normalizedBuf.length === expectedBuf.length &&
           crypto.timingSafeEqual(normalizedBuf, expectedBuf);
         if (!valid) throw unauthorized();
+        if (input.sentrySignatureHeader) {
+          const sentryIssueId = sentryIssueIdFromWebhookPayload(input.payload);
+          if (sentryIssueId) {
+            hmacReplayKey = `webhook-sentry-issue:${crypto
+              .createHash("sha256")
+              .update(`${trigger.id}:${sentryIssueId}`)
+              .digest("hex")}`;
+          }
+        }
       } else if (trigger.signingMode === "bearer") {
         const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
         const expected = `Bearer ${secretValue}`;
@@ -2968,7 +2988,8 @@ export function routineService(
           ? input.payload.variables
           : null,
         idempotencyKey: hmacReplayKey ?? input.idempotencyKey,
-        rejectIdempotencyReplay: hmacReplayKey !== null,
+        rejectIdempotencyReplay:
+          hmacReplayKey !== null && !hmacReplayKey.startsWith("webhook-sentry-issue:"),
       });
     },
 

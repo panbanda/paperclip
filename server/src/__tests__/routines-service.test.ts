@@ -2363,6 +2363,63 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(run.status).toBe("issue_created");
   });
 
+  it("accepts Sentry signatures and deduplicates retries by immutable issue id", async () => {
+    const { routine, svc } = await seedFixture();
+    const { trigger, secretMaterial } = await svc.createTrigger(
+      routine.id,
+      {
+        kind: "webhook",
+        signingMode: "github_hmac",
+      },
+      {},
+    );
+
+    const payload = {
+      action: "created",
+      data: {
+        issue: {
+          id: "7625432288",
+          shortId: "API-FX",
+          project: { slug: "api" },
+        },
+      },
+    };
+    const rawBody = Buffer.from(JSON.stringify(payload));
+    const signature = createHmac("sha256", secretMaterial!.webhookSecret)
+      .update(rawBody)
+      .digest("hex");
+    const request = {
+      sentrySignatureHeader: signature,
+      rawBody,
+      payload,
+    };
+
+    const retryPayload = {
+      ...payload,
+      action: "resolved",
+      actor: { type: "application", name: "Sentry" },
+    };
+    const retryRawBody = Buffer.from(JSON.stringify(retryPayload));
+    const retryRequest = {
+      sentrySignatureHeader: createHmac("sha256", secretMaterial!.webhookSecret)
+        .update(retryRawBody)
+        .digest("hex"),
+      rawBody: retryRawBody,
+      payload: retryPayload,
+    };
+
+    const first = await svc.firePublicTrigger(trigger.publicId!, request);
+    const retry = await svc.firePublicTrigger(trigger.publicId!, retryRequest);
+
+    expect(first).toMatchObject({ source: "webhook", status: "issue_created" });
+    expect(retry.id).toBe(first.id);
+    expect(retry.linkedIssueId).toBe(first.linkedIssueId);
+    expect(await db.select().from(routineRuns).where(eq(routineRuns.triggerId, trigger.id))).toHaveLength(1);
+    expect(
+      await db.select().from(issues).where(eq(issues.originId, routine.id)),
+    ).toHaveLength(1);
+  });
+
   it("rejects invalid signature for github_hmac signing mode", async () => {
     const { routine, svc } = await seedFixture();
     const { trigger } = await svc.createTrigger(
