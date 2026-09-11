@@ -319,6 +319,11 @@ function sentryIssueIdFromWebhookPayload(payload: Record<string, unknown> | null
   return typeof id === "string" || typeof id === "number" ? String(id) : null;
 }
 
+function sentryActionFromWebhookPayload(payload: Record<string, unknown> | null | undefined) {
+  const action = payload?.action;
+  return typeof action === "string" && action.trim().length > 0 ? action.trim() : null;
+}
+
 function parseBooleanVariableValue(name: string, raw: unknown) {
   if (typeof raw === "boolean") return raw;
   if (typeof raw === "number" && (raw === 0 || raw === 1)) return raw === 1;
@@ -2920,9 +2925,14 @@ export function routineService(
         if (input.sentrySignatureHeader) {
           const sentryIssueId = sentryIssueIdFromWebhookPayload(input.payload);
           if (sentryIssueId) {
-            hmacReplayKey = `webhook-sentry-issue:${crypto
+            const providerDeliveryId = input.idempotencyKey?.trim();
+            const action = sentryActionFromWebhookPayload(input.payload);
+            const deliveryIdentity = providerDeliveryId
+              ? `delivery:${providerDeliveryId}`
+              : `issue:${sentryIssueId}:action:${action ?? "unknown"}`;
+            hmacReplayKey = `webhook-sentry-event:${crypto
               .createHash("sha256")
-              .update(`${trigger.id}:${sentryIssueId}`)
+              .update(`${trigger.id}:${deliveryIdentity}`)
               .digest("hex")}`;
           }
         }
@@ -2989,7 +2999,7 @@ export function routineService(
           : null,
         idempotencyKey: hmacReplayKey ?? input.idempotencyKey,
         rejectIdempotencyReplay:
-          hmacReplayKey !== null && !hmacReplayKey.startsWith("webhook-sentry-issue:"),
+          hmacReplayKey !== null && !hmacReplayKey.startsWith("webhook-sentry-event:"),
       });
     },
 
