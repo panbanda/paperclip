@@ -19,17 +19,21 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..")
 describe("canonical semantic-catalog reconciliation authority", () => {
   it("pins the reconciled op-set relationship between the two catalogs", () => {
     const summary = capabilityCatalogReconciliation();
-    expect(summary.scenarioCount).toBe(37);
-    expect(summary.liveCount).toBe(28);
-    expect(summary.sharedCount).toBe(24);
-    expect(summary.unionCount).toBe(41);
+    expect(summary.scenarioCount).toBe(39);
+    expect(summary.liveCount).toBe(35);
+    expect(summary.sharedCount).toBe(27);
+    expect(summary.unionCount).toBe(47);
     // Any operation added to or removed from either catalog without a
     // reconciliation decision changes these exact sets and fails the gate.
     expect(summary.liveOnly).toEqual([
+      "call_api",
+      "create_project",
       "get_agent",
       "get_approval",
       "get_approval_context",
+      "list_project_repositories",
       "schedule_wake",
+      "search_api",
     ]);
     expect(summary.scenarioOnly).toEqual([
       "administer_company",
@@ -38,7 +42,6 @@ describe("canonical semantic-catalog reconciliation authority", () => {
       "list_cases",
       "list_company_skills",
       "list_goals",
-      "list_projects",
       "list_routines",
       "list_secret_metadata",
       "manage_routine",
@@ -49,7 +52,7 @@ describe("canonical semantic-catalog reconciliation authority", () => {
   });
 
   it("is the single source both catalogs derive their operation set from", () => {
-    expect(CAPABILITY_CANONICAL_OPERATIONS).toHaveLength(41);
+    expect(CAPABILITY_CANONICAL_OPERATIONS).toHaveLength(47);
     const canonicalIds = new Set(CAPABILITY_CANONICAL_OPERATIONS.map((operation) => operation.operationId));
     // Neither catalog may contain an operation absent from the canonical source.
     for (const tool of SCENARIO_CATALOG) expect(canonicalIds.has(tool.operationId)).toBe(true);
@@ -83,7 +86,7 @@ describe("canonical semantic-catalog reconciliation authority", () => {
   });
 
   it("names placement, claims, task modes, side-effect class, idempotency, redaction, mock mapping, real binding status, and PRP evidence for every operation", () => {
-    expect(CAPABILITY_CANONICAL_CATALOG).toHaveLength(41);
+    expect(CAPABILITY_CANONICAL_CATALOG).toHaveLength(47);
     for (const operation of CAPABILITY_CANONICAL_CATALOG) {
       expect(operation.placement).toMatch(/^(always|optional)_agent_tool$/);
       expect(Array.isArray(operation.requiredClaims)).toBe(true);
@@ -109,8 +112,8 @@ describe("canonical semantic-catalog reconciliation authority", () => {
   it("classifies real binding status so generic_api_request is never product coverage", () => {
     const summary = capabilityCatalogReconciliation();
     expect(summary.byRealBindingStatus).toEqual({
-      live_codex: 27,
-      scenario_mock: 13,
+      live_codex: 34,
+      scenario_mock: 12,
       test_only: 1,
     });
     expect(capabilityCanonicalOperation("generic_api_request")?.realBindingStatus).toBe("test_only");
