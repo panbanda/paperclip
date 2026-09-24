@@ -16,6 +16,7 @@ import {
   heartbeatRuns,
   instanceSettings,
   issueInboxArchives,
+  issueComments,
   issues,
   projectWorkspaces,
   projects,
@@ -2362,65 +2363,102 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(run.status).toBe("issue_created");
   });
 
-  it("deduplicates identical Sentry event retries but delivers distinct issue actions", async () => {
-    const { routine, svc } = await seedFixture();
-    const { trigger, secretMaterial } = await svc.createTrigger(
-      routine.id,
-      {
-        kind: "webhook",
-        signingMode: "github_hmac",
-      },
-      {},
-    );
-
-    const payload = {
-      action: "created",
-      data: {
-        issue: {
-          id: "7625432288",
-          shortId: "API-FX",
-          project: { slug: "api" },
+  it.each(["todo", "done"] as const)(
+    "updates the canonical %s Sentry issue for a recurrence without creating a duplicate",
+    async (canonicalStatus) => {
+      const { routine, svc } = await seedFixture();
+      const { trigger, secretMaterial } = await svc.createTrigger(
+        routine.id,
+        {
+          kind: "webhook",
+          signingMode: "github_hmac",
         },
-      },
-    };
-    const rawBody = Buffer.from(JSON.stringify(payload));
-    const signature = createHmac("sha256", secretMaterial!.webhookSecret)
-      .update(rawBody)
-      .digest("hex");
-    const request = {
-      sentrySignatureHeader: signature,
-      rawBody,
-      payload,
-    };
+        {},
+      );
 
-    const resolvedPayload = {
-      ...payload,
-      action: "resolved",
-      actor: { type: "application", name: "Sentry" },
-    };
-    const resolvedRawBody = Buffer.from(JSON.stringify(resolvedPayload));
-    const resolvedRequest = {
-      sentrySignatureHeader: createHmac("sha256", secretMaterial!.webhookSecret)
-        .update(resolvedRawBody)
-        .digest("hex"),
-      rawBody: resolvedRawBody,
-      payload: resolvedPayload,
-    };
+      const payload = {
+        action: "created",
+        data: {
+          issue: {
+            id: "7625432288",
+            shortId: "API-FX",
+            project: { slug: "api" },
+          },
+        },
+      };
+      const rawBody = Buffer.from(JSON.stringify(payload));
+      const signature = createHmac("sha256", secretMaterial!.webhookSecret)
+        .update(rawBody)
+        .digest("hex");
+      const request = {
+        sentrySignatureHeader: signature,
+        rawBody,
+        payload,
+      };
+      const first = await svc.firePublicTrigger(trigger.publicId!, request);
 
-    const first = await svc.firePublicTrigger(trigger.publicId!, request);
-    const retry = await svc.firePublicTrigger(trigger.publicId!, request);
-    const resolved = await svc.firePublicTrigger(trigger.publicId!, resolvedRequest);
+      if (canonicalStatus === "done") {
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, first.linkedIssueId!));
+      }
 
-    expect(first).toMatchObject({ source: "webhook", status: "issue_created" });
-    expect(retry.id).toBe(first.id);
-    expect(retry.linkedIssueId).toBe(first.linkedIssueId);
-    expect(resolved.id).not.toBe(first.id);
-    expect(resolved.linkedIssueId).not.toBe(first.linkedIssueId);
-    expect(await db.select().from(routineRuns).where(eq(routineRuns.triggerId, trigger.id))).toHaveLength(2);
-    expect(
-      await db.select().from(issues).where(eq(issues.originId, routine.id)),
-    ).toHaveLength(2);
-  });
+      const resolvedPayload = {
+        ...payload,
+        action: "unresolved",
+        data: {
+          issue: {
+            ...payload.data.issue,
+            count: "2",
+            status: "unresolved",
+            lastSeen: "2026-09-22T01:01:50Z",
+          },
+        },
+        actor: { type: "application", name: "Sentry" },
+      };
+      const resolvedRawBody = Buffer.from(JSON.stringify(resolvedPayload));
+      const resolvedRequest = {
+        sentrySignatureHeader: createHmac("sha256", secretMaterial!.webhookSecret)
+          .update(resolvedRawBody)
+          .digest("hex"),
+        rawBody: resolvedRawBody,
+        payload: resolvedPayload,
+      };
+
+      const retry = await svc.firePublicTrigger(trigger.publicId!, request);
+      const resolved = await svc.firePublicTrigger(trigger.publicId!, resolvedRequest);
+
+      expect(first).toMatchObject({ source: "webhook", status: "issue_created" });
+      expect(retry.id).toBe(first.id);
+      expect(retry.linkedIssueId).toBe(first.linkedIssueId);
+      expect(resolved.id).not.toBe(first.id);
+      expect(resolved).toMatchObject({ status: "completed", linkedIssueId: first.linkedIssueId });
+      expect(await db.select().from(routineRuns).where(eq(routineRuns.triggerId, trigger.id))).toHaveLength(2);
+      expect(
+        await db.select().from(issues).where(eq(issues.originId, routine.id)),
+      ).toHaveLength(1);
+      expect(
+        await db.select().from(issueComments).where(eq(issueComments.issueId, first.linkedIssueId!)),
+      ).toEqual([
+        expect.objectContaining({
+          authorType: "system",
+          body: expect.stringContaining("Immutable Sentry issue ID: 7625432288"),
+        }),
+      ]);
+      expect(
+        await db.select().from(activityLog).where(eq(activityLog.entityId, resolved.id)),
+      ).toEqual([
+        expect.objectContaining({
+          action: "routine.run_triggered",
+          details: expect.objectContaining({
+            routineId: routine.id,
+            triggerId: trigger.id,
+            source: "webhook",
+            status: "completed",
+          }),
+        }),
+      ]);
+    },
+    20_000,
+  );
 
   it("prefers a provider delivery id when deduplicating Sentry webhook retries", async () => {
     const { routine, svc } = await seedFixture();
@@ -2474,15 +2512,32 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       {},
     );
 
-    const rawBody = Buffer.from(JSON.stringify({ ok: true }));
+    const payload = {
+      action: "unresolved",
+      data: { issue: { id: "7625432288", project: { slug: "api" } } },
+    };
+    const rawBody = Buffer.from(JSON.stringify(payload));
 
     await expect(
       svc.firePublicTrigger(trigger.publicId!, {
-        hubSignatureHeader: "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+        sentrySignatureHeader: "0000000000000000000000000000000000000000000000000000000000000000",
         rawBody,
-        payload: { ok: true },
+        payload,
       }),
     ).rejects.toThrow();
+    expect(
+      await db.select().from(activityLog).where(eq(activityLog.entityId, routine.id)),
+    ).toEqual([
+      expect.objectContaining({
+        action: "routine.webhook_rejected",
+        details: {
+          triggerId: trigger.id,
+          test: false,
+          result: "rejected",
+        },
+      }),
+    ]);
+    expect(await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id))).toHaveLength(0);
   });
 
   it("accepts any request with none signing mode", async () => {

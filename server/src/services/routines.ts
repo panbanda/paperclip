@@ -332,6 +332,29 @@ function sentryActionFromWebhookPayload(payload: Record<string, unknown> | null 
   return typeof action === "string" && action.trim().length > 0 ? action.trim() : null;
 }
 
+function sentryRecurrenceSummary(payload: Record<string, unknown> | null | undefined) {
+  if (!payload) return null;
+  const data = isPlainRecord(payload.data) ? payload.data : null;
+  const issue = data && isPlainRecord(data.issue) ? data.issue : null;
+  if (!issue) return null;
+  const value = (key: string) => {
+    const candidate = issue[key];
+    return typeof candidate === "string" || typeof candidate === "number" ? String(candidate) : null;
+  };
+  const project = isPlainRecord(issue.project) ? issue.project : null;
+  const projectSlug = project && typeof project.slug === "string" ? project.slug : null;
+  const fields = [
+    `- Immutable Sentry issue ID: ${value("id") ?? "unknown"}`,
+    `- Action: ${sentryActionFromWebhookPayload(payload) ?? "unknown"}`,
+    `- Project: ${projectSlug ?? "unknown"}`,
+    `- Issue key: ${value("shortId") ?? "unknown"}`,
+    `- Status: ${value("status") ?? "unknown"}`,
+    `- Event count: ${value("count") ?? "unknown"}`,
+    `- Last seen: ${value("lastSeen") ?? "unknown"}`,
+  ];
+  return `Sentry recurrence received\n\n${fields.join("\n")}`;
+}
+
 function parseBooleanVariableValue(name: string, raw: unknown) {
   if (typeof raw === "boolean") return raw;
   if (typeof raw === "number" && (raw === 0 || raw === 1)) return raw === 1;
@@ -1737,6 +1760,8 @@ export function routineService(
     descriptionAppendix?: string | null;
     nextRunAtOverride?: Date | null;
     actor?: Actor;
+    canonicalProviderEntityId?: string | null;
+    canonicalProviderSummary?: string | null;
   }) {
     const projectId = input.projectId ?? input.routine.projectId ?? null;
     const projectWorkspaceId = input.projectWorkspaceId ?? null;
@@ -1883,6 +1908,55 @@ export function routineService(
 
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
+        if (input.canonicalProviderEntityId && input.canonicalProviderSummary) {
+          const canonicalIssue = await txDb
+            .select({ issue: issues })
+            .from(routineRuns)
+            .innerJoin(
+              issues,
+              and(
+                eq(issues.id, routineRuns.linkedIssueId),
+                eq(issues.companyId, input.routine.companyId),
+                eq(issues.originKind, issueOriginKind),
+                eq(issues.originId, issueOriginId),
+              ),
+            )
+            .where(
+              and(
+                eq(routineRuns.companyId, input.routine.companyId),
+                eq(routineRuns.routineId, input.routine.id),
+                ne(routineRuns.id, createdRun.id),
+                sql`${routineRuns.triggerPayload} #>> '{data,issue,id}' = ${input.canonicalProviderEntityId}`,
+              ),
+            )
+            .orderBy(desc(routineRuns.createdAt), desc(routineRuns.id))
+            .limit(1)
+            .then((rows) => rows[0]?.issue ?? null);
+          if (canonicalIssue) {
+            await issueSvc.addComment(
+              canonicalIssue.id,
+              input.canonicalProviderSummary,
+              {},
+              { authorType: "system", authorizationReason: "routine_webhook_canonical_recurrence" },
+              txDb,
+            );
+            const updated = await finalizeRun(createdRun.id, {
+              status: "completed",
+              linkedIssueId: canonicalIssue.id,
+              completedAt: triggeredAt,
+            }, txDb);
+            await updateRoutineTouchedState({
+              routineId: input.routine.id,
+              triggerId: input.trigger?.id ?? null,
+              triggeredAt,
+              status: "completed",
+              issueId: canonicalIssue.id,
+              nextRunAt,
+            }, txDb);
+            return updated ?? createdRun;
+          }
+        }
+
         const activeIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, {
           kind: issueOriginKind,
           id: issueOriginId,
@@ -2979,10 +3053,9 @@ export function routineService(
               const sentryIssueId = sentryIssueIdFromWebhookPayload(input.payload);
               if (sentryIssueId) {
                 const providerDeliveryId = input.idempotencyKey?.trim();
-                const action = sentryActionFromWebhookPayload(input.payload);
                 const deliveryIdentity = providerDeliveryId
                   ? `delivery:${providerDeliveryId}`
-                  : `issue:${sentryIssueId}:action:${action ?? "unknown"}`;
+                  : `payload:${expectedHmac}`;
                 hmacReplayKey = `webhook-sentry-event:${crypto
                   .createHash("sha256")
                   .update(`${trigger.id}:${deliveryIdentity}`)
@@ -3078,6 +3151,12 @@ export function routineService(
         idempotencyKey: hmacReplayKey ?? input.idempotencyKey,
         rejectIdempotencyReplay:
           hmacReplayKey !== null && !hmacReplayKey.startsWith("webhook-sentry-event:"),
+        canonicalProviderEntityId: input.sentrySignatureHeader
+          ? sentryIssueIdFromWebhookPayload(input.payload)
+          : null,
+        canonicalProviderSummary: input.sentrySignatureHeader
+          ? sentryRecurrenceSummary(input.payload)
+          : null,
       });
     },
 
