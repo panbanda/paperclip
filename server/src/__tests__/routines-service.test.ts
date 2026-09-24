@@ -2425,12 +2425,15 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
       const retry = await svc.firePublicTrigger(trigger.publicId!, request);
       const resolved = await svc.firePublicTrigger(trigger.publicId!, resolvedRequest);
+      const resolvedRetry = await svc.firePublicTrigger(trigger.publicId!, resolvedRequest);
 
       expect(first).toMatchObject({ source: "webhook", status: "issue_created" });
       expect(retry.id).toBe(first.id);
       expect(retry.linkedIssueId).toBe(first.linkedIssueId);
       expect(resolved.id).not.toBe(first.id);
       expect(resolved).toMatchObject({ status: "completed", linkedIssueId: first.linkedIssueId });
+      expect(resolvedRetry.id).toBe(resolved.id);
+      expect(resolvedRetry.linkedIssueId).toBe(first.linkedIssueId);
       expect(await db.select().from(routineRuns).where(eq(routineRuns.triggerId, trigger.id))).toHaveLength(2);
       expect(
         await db.select().from(issues).where(eq(issues.originId, routine.id)),
