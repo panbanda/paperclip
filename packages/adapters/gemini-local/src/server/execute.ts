@@ -39,6 +39,7 @@ import {
   ensurePaperclipSkillSymlink,
   joinPromptSections,
   ensurePathInEnv,
+  buildLocalAgentProcessEnv,
   refreshPaperclipWorkspaceEnvForExecution,
   isPaperclipSkillSourceMissing,
   readPaperclipRuntimeSkillEntries,
@@ -100,7 +101,9 @@ function buildGeminiHeadlessEnv(env: Record<string, string>): Record<string, str
 
 function buildGeminiRuntimeEnv(env: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...buildGeminiHeadlessEnv(env) })).filter(
+    Object.entries(
+      ensurePathInEnv(buildLocalAgentProcessEnv(process.env, buildGeminiHeadlessEnv(env))),
+    ).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
