@@ -357,6 +357,23 @@ function sentryRecurrenceSummary(payload: Record<string, unknown> | null | undef
   return `Sentry recurrence received\n\n${fields.join("\n")}`;
 }
 
+const PAPERCLIP_PROVIDER_IDENTITY_KEY = "_paperclipProviderIdentity";
+
+function withCanonicalProviderIdentity(
+  payload: Record<string, unknown> | null,
+  providerEntityId: string | null | undefined,
+) {
+  if (!providerEntityId) return payload;
+  return {
+    ...(payload ?? {}),
+    [PAPERCLIP_PROVIDER_IDENTITY_KEY]: {
+      provider: "sentry",
+      entityType: "issue",
+      entityId: providerEntityId,
+    },
+  };
+}
+
 function parseBooleanVariableValue(name: string, raw: unknown) {
   if (typeof raw === "boolean") return raw;
   if (typeof raw === "number" && (raw === 0 || raw === 1)) return raw === 1;
@@ -1802,7 +1819,13 @@ export function routineService(
     const description = [baseDescription, input.descriptionAppendix]
       .filter((part): part is string => Boolean(part && part.trim()))
       .join("\n\n");
-    const triggerPayload = mergeRoutineRunPayload(input.payload, { ...automaticVariables, ...resolvedVariables });
+    // Persist provider identity from the verified request as server-owned metadata. Raw
+    // webhook payloads remain useful evidence, but they are not the canonical lookup key:
+    // providers may add or reorder mutable fields between delayed lifecycle deliveries.
+    const triggerPayload = withCanonicalProviderIdentity(
+      mergeRoutineRunPayload(input.payload, { ...automaticVariables, ...resolvedVariables }),
+      input.canonicalProviderEntityId,
+    );
     const managedRoutineBinding = await getManagedRoutineBinding(input.routine);
     const managedIssueTemplate = readManagedRoutineIssueTemplate(managedRoutineBinding?.defaultsJson);
     const issueOriginKind = managedIssueTemplate?.surfaceVisibility === "plugin_operation" && managedRoutineBinding
@@ -1928,7 +1951,10 @@ export function routineService(
                 eq(routineRuns.companyId, input.routine.companyId),
                 eq(routineRuns.routineId, input.routine.id),
                 ne(routineRuns.id, createdRun.id),
-                sql`${routineRuns.triggerPayload} #>> '{data,issue,id}' = ${input.canonicalProviderEntityId}`,
+                sql`coalesce(
+                  ${routineRuns.triggerPayload} #>> '{${sql.raw(PAPERCLIP_PROVIDER_IDENTITY_KEY)},entityId}',
+                  ${routineRuns.triggerPayload} #>> '{data,issue,id}'
+                ) = ${input.canonicalProviderEntityId}`,
               ),
             )
             .orderBy(desc(routineRuns.createdAt), desc(routineRuns.id))

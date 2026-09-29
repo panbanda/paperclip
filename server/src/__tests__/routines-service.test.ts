@@ -2498,7 +2498,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   });
 
   it.each(["todo", "done"] as const)(
-    "updates the canonical %s Sentry issue for a recurrence without creating a duplicate",
+    "updates the canonical %s Sentry issue across delayed lifecycle events without creating a duplicate",
     async (canonicalStatus) => {
       const { routine, svc } = await seedFixture();
       const { trigger, secretMaterial } = await svc.createTrigger(
@@ -2537,7 +2537,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
       const resolvedPayload = {
         ...payload,
-        action: "unresolved",
+        action: "assigned",
         data: {
           issue: {
             ...payload.data.issue,
@@ -2558,17 +2558,50 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       };
 
       const retry = await svc.firePublicTrigger(trigger.publicId!, request);
-      const resolved = await svc.firePublicTrigger(trigger.publicId!, resolvedRequest);
-      const resolvedRetry = await svc.firePublicTrigger(trigger.publicId!, resolvedRequest);
+      const assigned = await svc.firePublicTrigger(trigger.publicId!, resolvedRequest);
+      const assignedRetry = await svc.firePublicTrigger(trigger.publicId!, resolvedRequest);
+
+      const unresolvedPayload = {
+        ...resolvedPayload,
+        action: "unresolved",
+        data: {
+          issue: {
+            ...resolvedPayload.data.issue,
+            count: "3",
+            lastSeen: "2026-09-29T01:56:15.301Z",
+          },
+        },
+      };
+      const unresolvedRawBody = Buffer.from(JSON.stringify(unresolvedPayload));
+      const unresolved = await svc.firePublicTrigger(trigger.publicId!, {
+        sentrySignatureHeader: createHmac("sha256", secretMaterial!.webhookSecret)
+          .update(unresolvedRawBody)
+          .digest("hex"),
+        rawBody: unresolvedRawBody,
+        payload: unresolvedPayload,
+      });
 
       expect(first).toMatchObject({ source: "webhook", status: "issue_created" });
       expect(retry.id).toBe(first.id);
       expect(retry.linkedIssueId).toBe(first.linkedIssueId);
-      expect(resolved.id).not.toBe(first.id);
-      expect(resolved).toMatchObject({ status: "completed", linkedIssueId: first.linkedIssueId });
-      expect(resolvedRetry.id).toBe(resolved.id);
-      expect(resolvedRetry.linkedIssueId).toBe(first.linkedIssueId);
-      expect(await db.select().from(routineRuns).where(eq(routineRuns.triggerId, trigger.id))).toHaveLength(2);
+      expect(assigned.id).not.toBe(first.id);
+      expect(assigned).toMatchObject({ status: "completed", linkedIssueId: first.linkedIssueId });
+      expect(assignedRetry.id).toBe(assigned.id);
+      expect(assignedRetry.linkedIssueId).toBe(first.linkedIssueId);
+      expect(unresolved).toMatchObject({ status: "completed", linkedIssueId: first.linkedIssueId });
+      const storedRuns = await db.select().from(routineRuns).where(eq(routineRuns.triggerId, trigger.id));
+      expect(storedRuns).toHaveLength(3);
+      expect(storedRuns).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          triggerPayload: expect.objectContaining({
+            _paperclipProviderIdentity: {
+              provider: "sentry",
+              entityType: "issue",
+              entityId: "7625432288",
+            },
+          }),
+        }),
+      ]));
       expect(
         await db.select().from(issues).where(eq(issues.originId, routine.id)),
       ).toHaveLength(1);
@@ -2579,9 +2612,13 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           authorType: "system",
           body: expect.stringContaining("Immutable Sentry issue ID: 7625432288"),
         }),
+        expect.objectContaining({
+          authorType: "system",
+          body: expect.stringContaining("Action: unresolved"),
+        }),
       ]);
       expect(
-        await db.select().from(activityLog).where(eq(activityLog.entityId, resolved.id)),
+        await db.select().from(activityLog).where(eq(activityLog.entityId, assigned.id)),
       ).toEqual([
         expect.objectContaining({
           action: "routine.run_triggered",
@@ -2596,6 +2633,50 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     },
     20_000,
   );
+
+  it("routes a signed dashboard event to the routine assignee and dashboard workspace", async () => {
+    const { companyId, agentId, projectId, routine, svc } = await seedFixture();
+    const dashboardWorkspaceId = randomUUID();
+    await db.update(agents).set({ name: "Product Engineer" }).where(eq(agents.id, agentId));
+    await db.insert(projectWorkspaces).values({
+      id: dashboardWorkspaceId,
+      companyId,
+      projectId,
+      name: "Dashboard",
+      isPrimary: true,
+      sharedWorkspaceKey: "dashboard",
+    });
+    const { trigger, secretMaterial } = await svc.createTrigger(
+      routine.id,
+      { kind: "webhook", signingMode: "github_hmac" },
+      {},
+    );
+    const payload = {
+      action: "created",
+      data: {
+        issue: {
+          id: "7760233895",
+          shortId: "DASHBOARD-GR",
+          project: { slug: "dashboard" },
+        },
+      },
+    };
+    const rawBody = Buffer.from(JSON.stringify(payload));
+    const run = await svc.firePublicTrigger(trigger.publicId!, {
+      sentrySignatureHeader: createHmac("sha256", secretMaterial!.webhookSecret)
+        .update(rawBody)
+        .digest("hex"),
+      rawBody,
+      payload,
+    });
+
+    const [issue] = await db.select().from(issues).where(eq(issues.id, run.linkedIssueId!));
+    expect(issue).toMatchObject({
+      assigneeAgentId: agentId,
+      projectId,
+      projectWorkspaceId: dashboardWorkspaceId,
+    });
+  });
 
   it("prefers a provider delivery id when deduplicating Sentry webhook retries", async () => {
     const { routine, svc } = await seedFixture();
