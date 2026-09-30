@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -2449,6 +2449,43 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
     await expect(svc.firePublicTrigger(trigger.publicId!, request)).resolves.toMatchObject({
       status: "issue_created",
+    });
+  });
+
+  it("honors a recent keyless setup receipt written with the legacy header-aware fingerprint", async () => {
+    const { routine, svc, companyId } = await seedFixture();
+    const { trigger, secretMaterial } = await svc.createTrigger(
+      routine.id,
+      { kind: "webhook", signingMode: "bearer", setupPending: true },
+      {},
+    );
+    const rawBody = Buffer.from('{"event":"deployment.completed"}');
+    const authorizationHeader = `Bearer ${secretMaterial!.webhookSecret}`;
+    const legacyReceiptKey = `request:${createHash("sha256")
+      .update("bearer")
+      .update("\0")
+      .update(authorizationHeader)
+      .update("\0")
+      .update("")
+      .update("\0")
+      .update("")
+      .update("\0")
+      .update(rawBody)
+      .digest("hex")}`;
+    await db.insert(routineWebhookTestReceipts).values({
+      companyId,
+      triggerId: trigger.id,
+      deliveryKeyHash: createHash("sha256").update(legacyReceiptKey).digest("hex"),
+    });
+    await svc.updateTrigger(trigger.id, { setupPending: false }, {});
+
+    await expect(svc.firePublicTrigger(trigger.publicId!, {
+      authorizationHeader,
+      rawBody,
+      payload: { event: "deployment.completed" },
+    })).resolves.toMatchObject({
+      status: "test_received",
+      routineStarted: false,
     });
   });
 

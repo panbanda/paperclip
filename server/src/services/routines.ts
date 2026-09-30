@@ -3162,13 +3162,28 @@ export function routineService(
         }
         const deliveryKey = hmacReplayKey ?? appDelivery?.idempotencyKey ?? input.idempotencyKey;
         const payload: Record<string, unknown> | null | undefined = appDelivery?.payload ?? input.payload;
+        const setupRequestBody = input.rawBody ?? Buffer.from(JSON.stringify(payload ?? {}));
         const setupReceiptKey = deliveryKey ?? `request:${crypto
           .createHash("sha256")
           .update(trigger.signingMode ?? "none")
           .update("\0")
-          .update(input.rawBody ?? Buffer.from(JSON.stringify(payload ?? {})))
+          .update(setupRequestBody)
           .digest("hex")}`;
         const setupReceiptKeyHash = crypto.createHash("sha256").update(setupReceiptKey).digest("hex");
+        const legacySetupReceiptKeyHash = deliveryKey == null
+          ? crypto.createHash("sha256").update(`request:${crypto
+              .createHash("sha256")
+              .update(trigger.signingMode ?? "none")
+              .update("\0")
+              .update(input.authorizationHeader ?? "")
+              .update("\0")
+              .update(input.firefliesSignatureHeader ?? input.hubSignatureHeader ?? input.sentrySignatureHeader ?? input.signatureHeader ?? "")
+              .update("\0")
+              .update(input.timestampHeader ?? "")
+              .update("\0")
+              .update(setupRequestBody)
+              .digest("hex")}`).digest("hex")
+          : null;
         if (trigger.setupPending) {
           await txDb.insert(routineWebhookTestReceipts).values({ companyId: routine.companyId, triggerId: trigger.id, deliveryKeyHash: setupReceiptKeyHash }).onConflictDoNothing();
           await recordDelivery("received");
@@ -3177,7 +3192,12 @@ export function routineService(
         const receipt = await txDb.select({ id: routineWebhookTestReceipts.id }).from(routineWebhookTestReceipts)
           .where(and(
             eq(routineWebhookTestReceipts.triggerId, trigger.id),
-            eq(routineWebhookTestReceipts.deliveryKeyHash, setupReceiptKeyHash),
+            legacySetupReceiptKeyHash
+              ? or(
+                  eq(routineWebhookTestReceipts.deliveryKeyHash, setupReceiptKeyHash),
+                  eq(routineWebhookTestReceipts.deliveryKeyHash, legacySetupReceiptKeyHash),
+                )
+              : eq(routineWebhookTestReceipts.deliveryKeyHash, setupReceiptKeyHash),
             ...(deliveryKey == null
               ? [gte(routineWebhookTestReceipts.receivedAt, new Date(Date.now() - 5 * 60_000))]
               : []),
