@@ -3162,17 +3162,27 @@ export function routineService(
         }
         const deliveryKey = hmacReplayKey ?? appDelivery?.idempotencyKey ?? input.idempotencyKey;
         const payload: Record<string, unknown> | null | undefined = appDelivery?.payload ?? input.payload;
-        const deliveryKeyHash = deliveryKey ? crypto.createHash("sha256").update(deliveryKey).digest("hex") : null;
+        const setupReceiptKey = deliveryKey ?? `request:${crypto
+          .createHash("sha256")
+          .update(trigger.signingMode)
+          .update("\0")
+          .update(input.authorizationHeader ?? "")
+          .update("\0")
+          .update(input.firefliesSignatureHeader ?? input.hubSignatureHeader ?? input.sentrySignatureHeader ?? input.signatureHeader ?? "")
+          .update("\0")
+          .update(input.timestampHeader ?? "")
+          .update("\0")
+          .update(input.rawBody ?? Buffer.from(JSON.stringify(payload ?? {})))
+          .digest("hex")}`;
+        const setupReceiptKeyHash = crypto.createHash("sha256").update(setupReceiptKey).digest("hex");
         if (trigger.setupPending) {
-          if (deliveryKeyHash) await txDb.insert(routineWebhookTestReceipts).values({ companyId: routine.companyId, triggerId: trigger.id, deliveryKeyHash }).onConflictDoNothing();
+          await txDb.insert(routineWebhookTestReceipts).values({ companyId: routine.companyId, triggerId: trigger.id, deliveryKeyHash: setupReceiptKeyHash }).onConflictDoNothing();
           await recordDelivery("received");
           return { routine, trigger, hmacReplayKey, deliveryKey, payload, testReceived: true };
         }
-        if (deliveryKeyHash) {
-          const receipt = await txDb.select({ id: routineWebhookTestReceipts.id }).from(routineWebhookTestReceipts)
-            .where(and(eq(routineWebhookTestReceipts.triggerId, trigger.id), eq(routineWebhookTestReceipts.deliveryKeyHash, deliveryKeyHash))).limit(1);
-          if (receipt.length) return { routine, trigger, hmacReplayKey, deliveryKey, payload, testReceived: true };
-        }
+        const receipt = await txDb.select({ id: routineWebhookTestReceipts.id }).from(routineWebhookTestReceipts)
+          .where(and(eq(routineWebhookTestReceipts.triggerId, trigger.id), eq(routineWebhookTestReceipts.deliveryKeyHash, setupReceiptKeyHash))).limit(1);
+        if (receipt.length) return { routine, trigger, hmacReplayKey, deliveryKey, payload, testReceived: true };
         await recordDelivery("received");
         return { routine, trigger, hmacReplayKey, deliveryKey, payload, meetingMetadata: appDelivery?.meetingMetadata, testReceived: false };
       });

@@ -2384,6 +2384,45 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
   });
 
+  it.each(["none", "bearer", "github_hmac"] as const)(
+    "never replays a keyless %s setup test after activation",
+    async (signingMode) => {
+      const { routine, svc } = await seedFixture();
+      const { trigger, secretMaterial } = await svc.createTrigger(
+        routine.id,
+        { kind: "webhook", signingMode, setupPending: true },
+        {},
+      );
+      const payload = { event: "deployment.completed", deployment_id: "setup-deploy-1" };
+      const rawBody = Buffer.from(JSON.stringify(payload));
+      const request = signingMode === "none"
+        ? { rawBody, payload }
+        : signingMode === "bearer"
+          ? {
+              authorizationHeader: `Bearer ${secretMaterial!.webhookSecret}`,
+              rawBody,
+              payload,
+            }
+          : {
+              hubSignatureHeader: `sha256=${createHmac("sha256", secretMaterial!.webhookSecret)
+                .update(rawBody)
+                .digest("hex")}`,
+              rawBody,
+              payload,
+            };
+
+      await expect(svc.firePublicTrigger(trigger.publicId!, request)).resolves.toMatchObject({
+        status: "test_received",
+      });
+      await svc.updateTrigger(trigger.id, { setupPending: false }, {});
+      await expect(svc.firePublicTrigger(trigger.publicId!, request)).resolves.toMatchObject({
+        status: "test_received",
+        routineStarted: false,
+      });
+      expect(await svc.listRuns(routine.id)).toEqual([]);
+    },
+  );
+
   it("dispatches one Fireflies run for concurrent retries and passes meeting metadata", async () => {
     const { svc, routine, trigger, delivery, wakeups } = await firefliesFixture();
     const results = await Promise.all([
