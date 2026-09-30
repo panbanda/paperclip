@@ -114,11 +114,14 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
       await fs.mkdir(path.join(second, ".paperclip"), { recursive: true });
       await fs.mkdir(path.join(second, ".worktrees"), { recursive: true });
       await fs.writeFile(path.join(second, ".paperclip", "tracked.json"), "committed\n");
+      await fs.writeFile(path.join(second, ".paperclip", "staged.txt"), "committed staged fixture\n");
       await fs.writeFile(path.join(second, ".worktrees", "tracked.txt"), "remove me\n");
       await execFile("git", ["-c", "protocol.file.allow=always", "submodule", "add", submodule, ".paperclip/tracked-module"], { cwd: second });
-      await execFile("git", ["add", ".paperclip/tracked.json", ".paperclip/tracked-module", ".worktrees/tracked.txt"], { cwd: second });
+      await execFile("git", ["add", ".paperclip/tracked.json", ".paperclip/staged.txt", ".paperclip/tracked-module", ".worktrees/tracked.txt"], { cwd: second });
       await execFile("git", ["commit", "-m", "track operational-named fixtures"], { cwd: second });
       await fs.writeFile(path.join(second, ".paperclip", "tracked.json"), "local tracked change\n");
+      await fs.writeFile(path.join(second, ".paperclip", "staged.txt"), "local staged change\n");
+      await execFile("git", ["add", ".paperclip/staged.txt"], { cwd: second });
       await fs.rm(path.join(second, ".worktrees", "tracked.txt"));
       await fs.writeFile(path.join(second, ".paperclip", "tracked-module", "README.md"), "new submodule revision\n");
       await execFile("git", ["add", "README.md"], { cwd: path.join(second, ".paperclip", "tracked-module") });
@@ -158,7 +161,17 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
       const managedSubmoduleEntry = (await execFile("git", ["ls-files", "-s", ".paperclip/tracked-module"], {
         cwd: repo!.cwd,
       })).stdout.trim();
-      expect(managedSubmoduleEntry).toContain(`160000 ${changedSubmoduleHead}`);
+      expect(managedSubmoduleEntry).not.toContain(changedSubmoduleHead);
+      const managedStagedPaths = (await execFile("git", ["diff", "--cached", "--name-only"], { cwd: repo!.cwd }))
+        .stdout.trim().split("\n").filter(Boolean);
+      const managedUnstagedPaths = (await execFile("git", ["diff", "--name-only"], { cwd: repo!.cwd }))
+        .stdout.trim().split("\n").filter(Boolean);
+      expect(managedStagedPaths).toEqual([".paperclip/staged.txt"]);
+      expect(managedUnstagedPaths).toEqual([
+        ".paperclip/tracked-module",
+        ".paperclip/tracked.json",
+        ".worktrees/tracked.txt",
+      ]);
       await expect(fs.readFile(path.join(second, ".paperclip", "execution-workspaces", "state.json"), "utf8"))
         .resolves.toBe("{}\n");
       await expect(fs.readFile(path.join(second, ".worktrees", "old-task", "node_modules", "cache.js"), "utf8"))
