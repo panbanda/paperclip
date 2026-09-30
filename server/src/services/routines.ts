@@ -1,7 +1,7 @@
 import { verifyAppWebhook } from "./app-webhook.js";
 import crypto from "node:crypto";
 import { verifyFirefliesWebhook } from "./fireflies-webhook.js";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -3166,12 +3166,6 @@ export function routineService(
           .createHash("sha256")
           .update(trigger.signingMode ?? "none")
           .update("\0")
-          .update(input.authorizationHeader ?? "")
-          .update("\0")
-          .update(input.firefliesSignatureHeader ?? input.hubSignatureHeader ?? input.sentrySignatureHeader ?? input.signatureHeader ?? "")
-          .update("\0")
-          .update(input.timestampHeader ?? "")
-          .update("\0")
           .update(input.rawBody ?? Buffer.from(JSON.stringify(payload ?? {})))
           .digest("hex")}`;
         const setupReceiptKeyHash = crypto.createHash("sha256").update(setupReceiptKey).digest("hex");
@@ -3181,7 +3175,13 @@ export function routineService(
           return { routine, trigger, hmacReplayKey, deliveryKey, payload, testReceived: true };
         }
         const receipt = await txDb.select({ id: routineWebhookTestReceipts.id }).from(routineWebhookTestReceipts)
-          .where(and(eq(routineWebhookTestReceipts.triggerId, trigger.id), eq(routineWebhookTestReceipts.deliveryKeyHash, setupReceiptKeyHash))).limit(1);
+          .where(and(
+            eq(routineWebhookTestReceipts.triggerId, trigger.id),
+            eq(routineWebhookTestReceipts.deliveryKeyHash, setupReceiptKeyHash),
+            ...(deliveryKey == null
+              ? [gte(routineWebhookTestReceipts.receivedAt, new Date(Date.now() - 5 * 60_000))]
+              : []),
+          )).limit(1);
         if (receipt.length) return { routine, trigger, hmacReplayKey, deliveryKey, payload, testReceived: true };
         await recordDelivery("received");
         return { routine, trigger, hmacReplayKey, deliveryKey, payload, meetingMetadata: appDelivery?.meetingMetadata, testReceived: false };
@@ -3190,6 +3190,7 @@ export function routineService(
       if ("ignored" in accepted) return { status: "ignored" as const, routineStarted: false, linkedIssueId: null };
       if (accepted.testReceived) return { status: "test_received" as const, test: true, routineStarted: false, linkedIssueId: null };
       const { routine, trigger, hmacReplayKey, deliveryKey, payload } = accepted;
+      const verifiedSentryDelivery = hmacReplayKey?.startsWith("webhook-sentry-event:") ?? false;
 
       const eligibility = await getAutomaticRoutineDispatchEligibility(routine);
       if (!eligibility.eligible) {
@@ -3236,10 +3237,10 @@ export function routineService(
         idempotencyKey: deliveryKey,
         rejectIdempotencyReplay:
           hmacReplayKey !== null && !hmacReplayKey.startsWith("webhook-sentry-event:"),
-        canonicalProviderEntityId: input.sentrySignatureHeader
+        canonicalProviderEntityId: verifiedSentryDelivery
           ? sentryIssueIdFromWebhookPayload(input.payload)
           : null,
-        canonicalProviderSummary: input.sentrySignatureHeader
+        canonicalProviderSummary: verifiedSentryDelivery
           ? sentryRecurrenceSummary(input.payload)
           : null,
       });

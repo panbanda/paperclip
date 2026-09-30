@@ -25,6 +25,7 @@ import {
   routineRuns,
   routines,
   routineTriggers,
+  routineWebhookTestReceipts,
   secretAccessEvents,
 } from "@paperclipai/db";
 import {
@@ -2415,13 +2416,41 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         status: "test_received",
       });
       await svc.updateTrigger(trigger.id, { setupPending: false }, {});
-      await expect(svc.firePublicTrigger(trigger.publicId!, request)).resolves.toMatchObject({
+      await expect(svc.firePublicTrigger(trigger.publicId!, {
+        ...request,
+        timestampHeader: "ignored-by-this-signing-mode",
+      })).resolves.toMatchObject({
         status: "test_received",
         routineStarted: false,
       });
       expect(await svc.listRuns(routine.id)).toEqual([]);
     },
   );
+
+  it("expires a keyless setup receipt instead of suppressing a later identical event forever", async () => {
+    const { routine, svc } = await seedFixture();
+    const { trigger } = await svc.createTrigger(
+      routine.id,
+      { kind: "webhook", signingMode: "none", setupPending: true },
+      {},
+    );
+    const request = {
+      rawBody: Buffer.from('{"event":"deployment.completed"}'),
+      payload: { event: "deployment.completed" },
+    };
+
+    await expect(svc.firePublicTrigger(trigger.publicId!, request)).resolves.toMatchObject({
+      status: "test_received",
+    });
+    await db.update(routineWebhookTestReceipts)
+      .set({ receivedAt: new Date(Date.now() - 10 * 60_000) })
+      .where(eq(routineWebhookTestReceipts.triggerId, trigger.id));
+    await svc.updateTrigger(trigger.id, { setupPending: false }, {});
+
+    await expect(svc.firePublicTrigger(trigger.publicId!, request)).resolves.toMatchObject({
+      status: "issue_created",
+    });
+  });
 
   it("dispatches one Fireflies run for concurrent retries and passes meeting metadata", async () => {
     const { svc, routine, trigger, delivery, wakeups } = await firefliesFixture();
@@ -2715,6 +2744,30 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       projectId,
       projectWorkspaceId: dashboardWorkspaceId,
     });
+  });
+
+  it("does not enable Sentry canonical handling from an unverified Sentry header", async () => {
+    const { routine, svc } = await seedFixture();
+    const { trigger, secretMaterial } = await svc.createTrigger(
+      routine.id,
+      { kind: "webhook", signingMode: "bearer" },
+      {},
+    );
+    const payload = {
+      action: "created",
+      data: { issue: { id: "7625432288", project: { slug: "api" } } },
+    };
+
+    const run = await svc.firePublicTrigger(trigger.publicId!, {
+      authorizationHeader: `Bearer ${secretMaterial!.webhookSecret}`,
+      sentrySignatureHeader: "not-verified-by-bearer-mode",
+      rawBody: Buffer.from(JSON.stringify(payload)),
+      payload,
+    });
+    const [storedRun] = await db.select().from(routineRuns).where(eq(routineRuns.id, run.id));
+
+    expect(run).toMatchObject({ status: "issue_created" });
+    expect(storedRun?.triggerPayload).not.toHaveProperty("_paperclipProviderIdentity");
   });
 
   it("prefers a provider delivery id when deduplicating Sentry webhook retries", async () => {
