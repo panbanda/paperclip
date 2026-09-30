@@ -2538,33 +2538,25 @@ async function materializeManagedProjectWorkspace(
         // Runtime roots are excluded from the directory overlay so nested Paperclip
         // workspaces cannot recursively copy themselves. They are still legal Git
         // paths, though, so replay tracked edits and deletions explicitly.
-        const operationalRoots = [".paperclip", ".worktrees"];
-        const gitChangedPaths = async (filter: string) => {
-          const result = await execFile(
-            "git",
-            ["-C", input.localSource!, "diff", "--name-only", "-z", "--no-renames", `--diff-filter=${filter}`, "HEAD", "--", ...operationalRoots],
-            { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
-          );
-          return result.stdout.split("\0").filter(Boolean);
-        };
-        const [changed, deleted] = await Promise.all([
-          gitChangedPaths("ACMRTUXB"),
-          gitChangedPaths("D"),
-        ]);
-        for (const relative of deleted) {
-          await fs.rm(path.join(cloneTmpDir, relative), { recursive: true, force: true });
-        }
-        for (const relative of changed) {
-          const sourcePath = path.join(input.localSource, relative);
-          const targetPath = path.join(cloneTmpDir, relative);
-          const stats = await fs.lstat(sourcePath);
-          await fs.mkdir(path.dirname(targetPath), { recursive: true });
-          await fs.rm(targetPath, { recursive: true, force: true });
-          if (stats.isSymbolicLink()) {
-            await fs.symlink(await fs.readlink(sourcePath), targetPath);
-          } else {
-            await fs.copyFile(sourcePath, targetPath);
-            await fs.chmod(targetPath, stats.mode);
+        const operationalPatch = await execFile(
+          "git",
+          ["-C", input.localSource, "diff", "--binary", "--full-index", "HEAD", "--", ".paperclip", ".worktrees"],
+          { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, encoding: "buffer" },
+        );
+        const patchBytes = Buffer.isBuffer(operationalPatch.stdout)
+          ? operationalPatch.stdout
+          : Buffer.from(operationalPatch.stdout);
+        if (patchBytes.length > 0) {
+          const patchPath = path.join(cloneTmpDir, ".git", "paperclip-operational-overlay.patch");
+          await fs.writeFile(patchPath, patchBytes);
+          try {
+            await execFile(
+              "git",
+              ["-C", cloneTmpDir, "apply", "--binary", "--index", "--whitespace=nowarn", patchPath],
+              { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
+            );
+          } finally {
+            await fs.rm(patchPath, { force: true });
           }
         }
       } finally {

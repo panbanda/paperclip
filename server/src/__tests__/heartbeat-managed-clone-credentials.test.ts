@@ -104,6 +104,7 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
   it("does not recursively copy Paperclip operational directories from a configured checkout", async () => {
     const first = await createLocalSourceRepo();
     const second = await createLocalSourceRepo();
+    const submodule = await createLocalSourceRepo();
     try {
       const anchor = await ensureManagedProjectWorkspace({
         companyId: "local-project-operational-state",
@@ -114,10 +115,19 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
       await fs.mkdir(path.join(second, ".worktrees"), { recursive: true });
       await fs.writeFile(path.join(second, ".paperclip", "tracked.json"), "committed\n");
       await fs.writeFile(path.join(second, ".worktrees", "tracked.txt"), "remove me\n");
-      await execFile("git", ["add", ".paperclip/tracked.json", ".worktrees/tracked.txt"], { cwd: second });
+      await execFile("git", ["-c", "protocol.file.allow=always", "submodule", "add", submodule, ".paperclip/tracked-module"], { cwd: second });
+      await execFile("git", ["add", ".paperclip/tracked.json", ".paperclip/tracked-module", ".worktrees/tracked.txt"], { cwd: second });
       await execFile("git", ["commit", "-m", "track operational-named fixtures"], { cwd: second });
       await fs.writeFile(path.join(second, ".paperclip", "tracked.json"), "local tracked change\n");
       await fs.rm(path.join(second, ".worktrees", "tracked.txt"));
+      await fs.writeFile(path.join(second, ".paperclip", "tracked-module", "README.md"), "new submodule revision\n");
+      await execFile("git", ["add", "README.md"], { cwd: path.join(second, ".paperclip", "tracked-module") });
+      await execFile("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "advance module"], {
+        cwd: path.join(second, ".paperclip", "tracked-module"),
+      });
+      const changedSubmoduleHead = (await execFile("git", ["rev-parse", "HEAD"], {
+        cwd: path.join(second, ".paperclip", "tracked-module"),
+      })).stdout.trim();
       await fs.mkdir(path.join(second, ".paperclip", "execution-workspaces"), { recursive: true });
       await fs.mkdir(path.join(second, ".worktrees", "old-task", "node_modules"), { recursive: true });
       await fs.writeFile(path.join(second, ".paperclip", "execution-workspaces", "state.json"), "{}\n");
@@ -145,12 +155,16 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
         .rejects.toMatchObject({ code: "ENOENT" });
       await expect(fs.stat(path.join(repo!.cwd, ".worktrees", "old-task")))
         .rejects.toMatchObject({ code: "ENOENT" });
+      const managedSubmoduleEntry = (await execFile("git", ["ls-files", "-s", ".paperclip/tracked-module"], {
+        cwd: repo!.cwd,
+      })).stdout.trim();
+      expect(managedSubmoduleEntry).toContain(`160000 ${changedSubmoduleHead}`);
       await expect(fs.readFile(path.join(second, ".paperclip", "execution-workspaces", "state.json"), "utf8"))
         .resolves.toBe("{}\n");
       await expect(fs.readFile(path.join(second, ".worktrees", "old-task", "node_modules", "cache.js"), "utf8"))
         .resolves.toBe("cache\n");
     } finally {
-      await Promise.all([first, second].map((cwd) => fs.rm(cwd, { recursive: true, force: true })));
+      await Promise.all([first, second, submodule].map((cwd) => fs.rm(cwd, { recursive: true, force: true })));
     }
   });
 
