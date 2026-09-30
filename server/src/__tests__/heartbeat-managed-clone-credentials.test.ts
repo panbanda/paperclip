@@ -100,6 +100,48 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
       await Promise.all([first, second].map((cwd) => fs.rm(cwd, { recursive: true, force: true })));
     }
   });
+
+  it("does not recursively copy Paperclip operational directories from a configured checkout", async () => {
+    const first = await createLocalSourceRepo();
+    const second = await createLocalSourceRepo();
+    try {
+      const anchor = await ensureManagedProjectWorkspace({
+        companyId: "local-project-operational-state",
+        projectId: "two",
+        repoUrl: first,
+      });
+      await fs.mkdir(path.join(second, ".paperclip", "execution-workspaces"), { recursive: true });
+      await fs.mkdir(path.join(second, ".worktrees", "old-task", "node_modules"), { recursive: true });
+      await fs.writeFile(path.join(second, ".paperclip", "execution-workspaces", "state.json"), "{}\n");
+      await fs.writeFile(path.join(second, ".worktrees", "old-task", "node_modules", "cache.js"), "cache\n");
+      await fs.writeFile(path.join(second, "operator-notes.md"), "preserve this untracked work\n");
+
+      const [repo] = await prepareProjectRepositoryWorkspaces({
+        cwd: anchor.cwd,
+        anchorRepoUrl: first,
+        workspaces: [{
+          id: "second",
+          cwd: second,
+          repoUrl: "https://github.com/example/backend.git",
+          repoRef: null,
+        }],
+      });
+
+      await expect(fs.readFile(path.join(repo!.cwd, "operator-notes.md"), "utf8"))
+        .resolves.toBe("preserve this untracked work\n");
+      await expect(fs.stat(path.join(repo!.cwd, ".paperclip")))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat(path.join(repo!.cwd, ".worktrees")))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.readFile(path.join(second, ".paperclip", "execution-workspaces", "state.json"), "utf8"))
+        .resolves.toBe("{}\n");
+      await expect(fs.readFile(path.join(second, ".worktrees", "old-task", "node_modules", "cache.js"), "utf8"))
+        .resolves.toBe("cache\n");
+    } finally {
+      await Promise.all([first, second].map((cwd) => fs.rm(cwd, { recursive: true, force: true })));
+    }
+  });
+
   it("keeps different repositories with the same name separate within one project", async () => {
     const first = await createLocalSourceRepo();
     const second = await createLocalSourceRepo();
