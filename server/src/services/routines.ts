@@ -3164,7 +3164,7 @@ export function routineService(
         const payload: Record<string, unknown> | null | undefined = appDelivery?.payload ?? input.payload;
         const setupReceiptKey = deliveryKey ?? `request:${crypto
           .createHash("sha256")
-          .update(trigger.signingMode)
+          .update(trigger.signingMode ?? "none")
           .update("\0")
           .update(input.authorizationHeader ?? "")
           .update("\0")
