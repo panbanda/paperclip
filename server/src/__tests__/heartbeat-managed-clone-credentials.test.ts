@@ -110,6 +110,14 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
         projectId: "two",
         repoUrl: first,
       });
+      await fs.mkdir(path.join(second, ".paperclip"), { recursive: true });
+      await fs.mkdir(path.join(second, ".worktrees"), { recursive: true });
+      await fs.writeFile(path.join(second, ".paperclip", "tracked.json"), "committed\n");
+      await fs.writeFile(path.join(second, ".worktrees", "tracked.txt"), "remove me\n");
+      await execFile("git", ["add", ".paperclip/tracked.json", ".worktrees/tracked.txt"], { cwd: second });
+      await execFile("git", ["commit", "-m", "track operational-named fixtures"], { cwd: second });
+      await fs.writeFile(path.join(second, ".paperclip", "tracked.json"), "local tracked change\n");
+      await fs.rm(path.join(second, ".worktrees", "tracked.txt"));
       await fs.mkdir(path.join(second, ".paperclip", "execution-workspaces"), { recursive: true });
       await fs.mkdir(path.join(second, ".worktrees", "old-task", "node_modules"), { recursive: true });
       await fs.writeFile(path.join(second, ".paperclip", "execution-workspaces", "state.json"), "{}\n");
@@ -129,9 +137,13 @@ describe("ensureManagedProjectWorkspace clone credentials", () => {
 
       await expect(fs.readFile(path.join(repo!.cwd, "operator-notes.md"), "utf8"))
         .resolves.toBe("preserve this untracked work\n");
-      await expect(fs.stat(path.join(repo!.cwd, ".paperclip")))
+      await expect(fs.readFile(path.join(repo!.cwd, ".paperclip", "tracked.json"), "utf8"))
+        .resolves.toBe("local tracked change\n");
+      await expect(fs.stat(path.join(repo!.cwd, ".paperclip", "execution-workspaces")))
         .rejects.toMatchObject({ code: "ENOENT" });
-      await expect(fs.stat(path.join(repo!.cwd, ".worktrees")))
+      await expect(fs.stat(path.join(repo!.cwd, ".worktrees", "tracked.txt")))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat(path.join(repo!.cwd, ".worktrees", "old-task")))
         .rejects.toMatchObject({ code: "ENOENT" });
       await expect(fs.readFile(path.join(second, ".paperclip", "execution-workspaces", "state.json"), "utf8"))
         .resolves.toBe("{}\n");
