@@ -13,6 +13,10 @@ import {
   emailEndpointSetupSchema,
   emailConnectionSchema,
   emailSendSchema,
+  browserUseControlSchema,
+  browserUseSettingsSchema,
+  browserUseViewportSchema,
+  browserUseViewerSchema,
   slackToolCallSchema,
   slackSearchConfigSchema,
   // Agent
@@ -27,6 +31,8 @@ import {
   updateAgentInstructionsPathSchema,
   updateAgentInstructionsBundleSchema,
   upsertAgentInstructionsFileSchema,
+  restoreAgentInstructionSchema,
+  resolveAgentInstructionCandidateSchema,
   createAgentKeySchema,
   builtInAgentEmptyMutationSchema,
   builtInAgentProvisionSchema,
@@ -167,6 +173,7 @@ import {
   createIssueThreadInteractionSchema,
   createChildIssueSchema,
   acceptIssueThreadInteractionSchema,
+  resolveConfirmationFromCommentSchema,
   rejectIssueThreadInteractionSchema,
   respondIssueThreadInteractionSchema,
   skipIssueThreadInteractionSchema,
@@ -206,6 +213,7 @@ import {
   // Issue recovery and decomposition
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
+  retryWorkspaceExportSchema,
   cancelIssueThreadInteractionSchema,
   // Secret provider configs and remote import
   createSecretProviderConfigSchema,
@@ -635,6 +643,10 @@ const registry = new OpenAPIRegistry();
 const heartbeatRunIdParamSchema = z.string()
   .regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/)
   .describe("Heartbeat run UUID; malformed values return 400");
+
+const cliAuthChallengeIdParamSchema = z.string().trim()
+  .regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/)
+  .describe("CLI auth challenge UUID; malformed values return 400");
 
 const ErrorSchema = registry.register("Error", z.object({ error: z.string() }));
 
@@ -1309,7 +1321,20 @@ const BOARD_ONLY_PREFIXES = [
   "/api/instance/",
 ];
 
+const browserUseOperations = [
+  ["get", "/api/issues/{issueId}/browsers", "List authorized task browsers", undefined],
+  ["get", "/api/issues/{issueId}/browsers/{browserId}/viewer", "Get a private live browser viewer", undefined],
+  ["post", "/api/issues/{issueId}/browsers/{browserId}/presence", "Renew visible browser presence", undefined],
+  ["post", "/api/issues/{issueId}/browsers/{browserId}/control", "Control a task browser", browserUseControlSchema],
+  ["post", "/api/issues/{issueId}/browsers/{browserId}/viewport", "Set the browser viewport", browserUseViewportSchema],
+  ["post", "/api/issues/{issueId}/browsers/{browserId}/viewport/release", "Release viewport ownership", browserUseViewerSchema],
+  ["get", "/api/companies/{companyId}/browser-use-cloud/grants/{grantId}/profiles", "List available browser profiles", undefined],
+  ["get", "/api/companies/{companyId}/browser-use-cloud/grants/{grantId}/settings", "Read browser credential settings", undefined],
+  ["put", "/api/companies/{companyId}/browser-use-cloud/grants/{grantId}/settings", "Update browser credential settings", browserUseSettingsSchema],
+] as const;
+
 const BOARD_ONLY_OPERATIONS = new Set([
+  ...browserUseOperations.map(([method, path]) => `${method.toUpperCase()} ${path}`),
   "GET /api/companies/{companyId}/ai-connections",
   "POST /api/companies/{companyId}/ai-connections",
   "POST /api/companies/{companyId}/ai-connections/local",
@@ -1435,6 +1460,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/connection-intents/{interactionId}/setup-options",
   "POST /api/connection-intents/{interactionId}/phase",
   "POST /api/connection-intents/{interactionId}/complete",
+  "POST /api/agents/{id}/connection-intents/{interactionId}/adopt",
   "POST /api/connection-intents/{interactionId}/decline",
   "GET /api/companies/{companyId}/tools/profiles",
   "POST /api/companies/{companyId}/tools/profiles",
@@ -2086,6 +2112,14 @@ registry.registerPath({
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
+
+for (const [method, path, summary, body] of browserUseOperations) {
+  registerCurrentRoute({
+    method, path, summary, body, tags: ["Browser Use Cloud"],
+    ...(path.endsWith("/viewer") ? { query: browserUseViewerSchema.partial() } : {}),
+    responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+  });
+}
 
 // Explicit task-bound email. Board setup and agent actions share the same vaulted
 // connection, while automatic chat publication never applies to these endpoints.
@@ -3449,8 +3483,8 @@ registry.registerPath({
   method: "get",
   path: "/api/agents/{id}/instructions-bundle/file",
   tags: ["agents"],
-  summary: "Get agent instructions file",
-  request: { params: z.object({ id: z.string() }) },
+  summary: "Get agent file content or download its original bytes",
+  request: { params: z.object({ id: z.string() }), query: z.object({ path: z.string(), download: z.enum(["true", "false"]).optional() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
 });
 
@@ -3466,12 +3500,46 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
+for (const operation of [
+  { suffix: "history", summary: "List immutable instruction revisions", query: z.object({ path: z.string().optional(), cursor: z.string().uuid().optional() }) },
+  { suffix: "revision/{revisionId}", summary: "Read exact instruction content at a revision", query: z.object({ path: z.string().optional() }) },
+  { suffix: "diff", summary: "Compare instruction revisions (exact common prefix, removed, added, suffix)", query: z.object({ path: z.string().optional(), from: z.string().uuid(), to: z.string().uuid() }) },
+]) {
+  registry.registerPath({ method: "get", path: `/api/agents/{id}/instructions-bundle/${operation.suffix}`, tags: ["agents"], summary: operation.summary,
+    request: { params: operation.suffix.includes("revisionId") ? z.object({ id: z.string(), revisionId: z.string().uuid() }) : z.object({ id: z.string() }), query: operation.query },
+    responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
+}
+registry.registerPath({ method: "post", path: "/api/agents/{id}/instructions-bundle/restore", tags: ["agents"], summary: "Restore a pre-upgrade instruction snapshot into current files with compare-and-swap",
+  request: { params: z.object({ id: z.string() }), body: jsonBody(restoreAgentInstructionSchema) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
+
+registry.registerPath({
+  method: "get",
+  path: "/api/agents/{id}/instructions-bundle/candidates",
+  tags: ["agents"],
+  summary: "List preserved instruction edits and collection diagnostics",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/instructions-bundle/candidates/{runId}/resolve",
+  tags: ["agents"],
+  summary: "Explicitly save a preserved instruction edit with compare-and-swap",
+  request: {
+    params: z.object({ id: z.string(), runId: z.string().uuid() }),
+    body: jsonBody(resolveAgentInstructionCandidateSchema),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
 registry.registerPath({
   method: "delete",
   path: "/api/agents/{id}/instructions-bundle/file",
   tags: ["agents"],
-  summary: "Delete agent instructions file",
-  request: { params: z.object({ id: z.string() }) },
+  summary: "Delete agent file with compare-and-swap for managed storage",
+  request: { params: z.object({ id: z.string() }), query: z.object({ path: z.string(), baseHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
@@ -3798,6 +3866,16 @@ registry.registerPath({
 });
 
 // ─── Issues ──────────────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/chats",
+  tags: ["issues"],
+  summary: "List the current board user's agent conversations",
+  description: "Requires Agent Chat to be enabled. Returns accessible conversations in the company, ordered by most recent activity. Each agent has one conversation per user.",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
 
 registry.registerPath({
   method: "get",
@@ -6468,7 +6546,7 @@ registry.registerPath({
   tags: ["access"],
   summary: "Approve a CLI auth challenge",
   request: {
-    params: z.object({ id: z.string() }),
+    params: z.object({ id: cliAuthChallengeIdParamSchema }),
     body: jsonBody(resolveCliAuthChallengeSchema),
   },
   responses: {
@@ -6485,7 +6563,7 @@ registry.registerPath({
   tags: ["access"],
   summary: "Cancel a CLI auth challenge",
   request: {
-    params: z.object({ id: z.string() }),
+    params: z.object({ id: cliAuthChallengeIdParamSchema }),
     body: jsonBody(resolveCliAuthChallengeSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 404: r.notFound },
@@ -7284,6 +7362,20 @@ registry.registerPath({
     body: jsonBody(createIssueThreadInteractionSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/interactions/{interactionId}/resolve-from-comment",
+  tags: ["issues"],
+  summary: "Record a user's conversational confirmation answer",
+  description: "An eligible active agent run resolves a confirmation on its own task using the latest user comment. Resolver permissions, target staleness and conversation reset boundaries remain enforced. Matching retries are idempotent. No new wake is scheduled.",
+  request: {
+    params: z.object({ id: z.string(), interactionId: z.string() }),
+    body: jsonBody(resolveConfirmationFromCommentSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    409: { description: "Stale or conflicting decision" }, 422: { description: "Invalid answer evidence or selection" } },
 });
 
 registry.registerPath({
@@ -9201,8 +9293,8 @@ registry.registerPath({
   path: "/api/cli-auth/challenges/{id}",
   tags: ["access"],
   summary: "Get a CLI auth challenge",
-  request: { params: z.object({ id: z.string() }) },
-  responses: { 200: r.ok(), 404: r.notFound },
+  request: { params: z.object({ id: cliAuthChallengeIdParamSchema }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 404: r.notFound },
 });
 
 // ─── Invite onboarding ────────────────────────────────────────────────────────
@@ -9958,6 +10050,15 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "post",
+  path: "/api/issues/{id}/recovery-actions/retry-workspace-export",
+  tags: ["issues"],
+  summary: "Retry only workspace export for a repaired accepted native result",
+  body: retryWorkspaceExportSchema,
+  responses: { 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "post",
   path: "/api/issues/{id}/recovery-actions/resolve",
   tags: ["issues"],
   summary: "Resolve an issue recovery action",
@@ -10204,6 +10305,23 @@ registerCurrentRoute({
   tags: ["connection-intents"],
   summary: "Complete an addressed connection request",
   body: completeConnectionIntentSchema,
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/agents/{id}/connection-intents/{interactionId}/adopt",
+  tags: ["connection-intents", "agents"],
+  summary: "Validate and atomically adopt an AI connection for a legacy agent",
+  body: completeConnectionIntentSchema,
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
 });
 
 registerCurrentRoute({
